@@ -17,7 +17,7 @@
   const rankDone = (r) => ticketsOfRank(r).every((t) => P.done[t.id]);
   const rank = () => { let r = 0; while (r < OD.RANKS.length - 1 && rankDone(r)) r++; return r; };
   const unlocked = (t) => t.rank <= rank();
-  const xpFor = (t) => Math.round(t.xp * Math.max(0.4, 1 - 0.2 * (P.hints[t.id] || 0)));
+  const xpFor = (t) => t.xp;
 
   // worlds live in memory for this visit; "Reset" rebuilds a ticket's world
   const worlds = {};
@@ -32,7 +32,7 @@
     Docker: "docker ps|logs|inspect|run|exec|stop|start|restart|rm|images|rmi|build|pull|image prune|system df|system prune",
     Kubernetes: "kubectl get|describe|logs|apply -f|edit|create|delete|set image|scale|autoscale|rollout status|history|undo|restart|exec|run|top|explain|config",
   };
-  C.help = () => ["Commands that work on this desk:", ...Object.entries(HELP).map(([k, v]) => `\n  ${k}\n    ${v}`), "\nTips: ↑/↓ for history, Tab to complete, Ctrl+L to clear, sudo for admin commands.", "Open the Runbook (right) for the ticket's procedure."].join("\n");
+  C.help = () => ["Commands that work on this desk:", ...Object.entries(HELP).map(([k, v]) => `\n  ${k}\n    ${v}`), "\nTips: ↑/↓ for history, Tab to complete, Ctrl+L to clear, sudo for admin commands.", "Open the Guide (right) for the briefing, runbook and hints."].join("\n");
 
   // ------------------------------------------------------------------ rendering helpers
   const ansi = (txt) => esc(txt).replace(/\x1bg(.*?)\x1b0/g, '<span class="g">$1</span>').replace(/\x1br(.*?)\x1b0/g, '<span class="r">$1</span>');
@@ -86,7 +86,7 @@ $ curl -s localhost/health
         <div class="me"><span class="rank">${OD.RANKS[r].title}</span><div class="xpbar" title="${xp()} / ${total} XP"><div style="width:${Math.round((xp() / total) * 100)}%"></div></div><span class="xpn">${xp()} XP</span></div>
         <div class="acts"><button class="btn sm" id="binder" title="Command reference">📒 <span class="bl">Binder</span></button><button class="btn sm ghost" id="menu" title="Back to the start page">⌂</button></div>
       </header>
-      <nav class="tabs" role="tablist">${["queue", "ticket", "runbook"].map((k) => `<button role="tab" data-p="${k}" class="${pane === k ? "on" : ""}">${{ queue: "Inbox", ticket: "Terminal", runbook: "Runbook" }[k]}</button>`).join("")}</nav>
+      <nav class="tabs" role="tablist">${["queue", "ticket", "runbook"].map((k) => `<button role="tab" data-p="${k}" class="${pane === k ? "on" : ""}">${{ queue: "Inbox", ticket: "Terminal", runbook: "Guide" }[k]}</button>`).join("")}</nav>
       <div class="grid" data-pane="${pane}">
         <aside class="queue">
           <h2>Inbox</h2>
@@ -106,14 +106,19 @@ $ curl -s localhost/health
           </section>
         </main>
         <aside class="runbook">
+          ${cur.brief ? `<div class="rb brief">
+            <h3>📋 Briefing</h3>
+            <h4>What's being asked</h4><p>${cur.brief.what}</p>
+            <h4>Background</h4><p>${cur.brief.context}</p>
+            <h4>Helpful to know</h4><ul>${cur.brief.info.map((x) => `<li>${x}</li>`).join("")}</ul>
+          </div>` : ""}
           <div class="rb">
-            <h3>Runbook · ${cur.topic}</h3>
+            <h3>🧭 Runbook · ${cur.topic}</h3>
             <ol>${cur.sop.map((x) => `<li>${x}</li>`).join("")}</ol>
           </div>
           <div class="rb hints">
-            <h3>Hints <small>(each one costs 20% of this ticket's XP)</small></h3>
-            ${cur.hints.map((h, i) => (i < (P.hints[cur.id] || 0) ? `<p class="hint"><b>${i + 1}.</b> <span>${esc(h).replace(/\n/g, "<br>")}</span></p>` : "")).join("")}
-            ${(P.hints[cur.id] || 0) < cur.hints.length && !P.done[cur.id] ? `<button class="btn sm ghost" id="hint">Reveal hint ${(P.hints[cur.id] || 0) + 1} of ${cur.hints.length}</button>` : ""}
+            <h3>💡 Hints <small>(free: from a nudge to the full answer)</small></h3>
+            ${cur.hints.map((h, i) => `<p class="hint"><b>${["Nudge", "Closer", "Answer"][i] || i + 1}:</b> <span>${esc(h).replace(/\n/g, "<br>")}</span></p>`).join("")}
           </div>
           <div class="rb resolve">
             <button class="btn primary wide" id="resolve">${P.done[cur.id] ? "Re-check" : "Resolve ticket"} <small>(${xpFor(cur)} XP)</small></button>
@@ -130,7 +135,6 @@ $ curl -s localhost/health
     $("#binder").onclick = binder;
     $("#msg").onclick = () => $("#msg").classList.toggle("open");
     $("#reset").onclick = () => { delete worlds[cur.id]; render(); flash("World rebuilt. Everything is broken again. 😈"); };
-    const hb = $("#hint"); if (hb) hb.onclick = () => { P.hints[cur.id] = (P.hints[cur.id] || 0) + 1; save(); render(); pane = "runbook"; };
     $("#resolve").onclick = () => grade(cur);
     terminal(cur);
   }

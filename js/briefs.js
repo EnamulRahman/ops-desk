@@ -1,0 +1,220 @@
+// Ops Desk: the briefing for each ticket. What's being asked, background on the system, and the knowledge you need to fix it.
+(() => {
+  "use strict";
+  const B = {
+    "PW-101": {
+      what: "The Parcelwise website is returning errors because the server's main disk is (almost) full. When an app can't write to disk it starts failing requests. Your job is to free space safely, without stopping the app.",
+      context: "web-01 runs <b>nginx</b> (the web server customers hit on port 80), which forwards requests to <b>parcelwise-api</b> on port 8080. The app writes a log to <code>/var/log/parcelwise/app.log</code>. Once a day the log is <i>rotated</i>: the current file is renamed to <code>app.log.1</code>, the old <code>.1</code> becomes <code>.2</code> and so on, and a fresh <code>app.log</code> is started. Nothing is cleaning up the old ones.",
+      info: [
+        "<code>df -h</code> = how full each disk (filesystem) is. <code>-h</code> means human-readable sizes (G, M).",
+        "<code>du -sh PATH</code> = how much space a folder or file uses. Run it on <code>/var/log/*</code> and work your way down.",
+        "Rotated logs (<code>app.log.1</code> to <code>.4</code>) are history. Nobody is writing to them, so deleting them frees space straight away.",
+        "The live <code>app.log</code> is open in the running app. On Linux, deleting a file that a process still has open does <b>not</b> free the space until that process closes it. <code>sudo lsof +L1</code> lists such files.",
+        "Files in <code>/var/log</code> belong to root or service users, so you need <code>sudo</code> to delete them.",
+        "Done when: the disk is under 80% and <code>curl localhost</code> returns the shop page.",
+      ],
+    },
+    "PW-102": {
+      what: "Sam edited the nginx config and restarted nginx. The new config has a syntax error, so nginx refused to start and the whole site is down. Find the error, fix it, and get nginx running again.",
+      context: "nginx reads its config at start-up. The Parcelwise site lives in <code>/etc/nginx/sites-enabled/parcelwise</code>. It's a <code>server { … }</code> block that listens on port 80 and <code>proxy_pass</code>es requests to the app on 127.0.0.1:8080. nginx is managed by <b>systemd</b>, the Linux service manager.",
+      info: [
+        "<code>systemctl status nginx</code> = is it running, and the last few log lines. <code>sudo journalctl -u nginx</code> = the full log.",
+        "<code>sudo nginx -t</code> tests the config <i>without</i> touching the running server, and tells you the file and line of any error.",
+        "nginx syntax: every directive ends with <code>;</code>, and blocks use <code>{ }</code>.",
+        "Edit root-owned files with <code>sudo nano FILE</code> (Save button or Ctrl+S in this editor).",
+        "<code>sudo systemctl restart nginx</code> to start it again after a successful <code>nginx -t</code>.",
+        "Done when: <code>nginx -t</code> passes, nginx is running, and <code>curl -I localhost</code> shows 200 OK.",
+      ],
+    },
+    "PW-103": {
+      what: "A new engineer, Jordan Lee, needs a Linux account on web-01. Create the user <b>jlee</b> with a home directory, the bash shell, and membership of the <b>deploy</b> group, but <b>not</b> sudo.",
+      context: "Every Linux user has a primary group and can be in extra (supplementary) groups. Groups control access: here, the <code>deploy</code> group can run deployments. Members of the <code>sudo</code> group can run any command as root, which a new starter shouldn't have on day one.",
+      info: [
+        "<code>sudo useradd [options] USERNAME</code> creates a user. Useful options: <code>-m</code> creates <code>/home/USERNAME</code>, <code>-s /bin/bash</code> sets the login shell, <code>-G group1,group2</code> sets extra groups.",
+        "<code>id jlee</code> shows a user's uid and groups. <code>getent passwd jlee</code> shows their account line (home and shell).",
+        "To add an existing user to a group later: <code>sudo usermod -aG GROUP USER</code>. The <code>-a</code> (append) matters; without it you replace all their groups.",
+        "<code>getent group deploy</code> lists who is in a group.",
+        "Done when: jlee exists with /home/jlee, bash, is in deploy, and is not in sudo.",
+      ],
+    },
+    "PW-104": {
+      what: "The nightly database backup hasn't run since Monday. Find out why, fix it, and take a fresh backup now.",
+      context: "Backups run from <b>cron</b>, Linux's job scheduler. <code>/etc/cron.d/db-backup</code> runs <code>/opt/scripts/db-backup.sh</code> as root at 02:00 every night and appends its output to <code>/var/log/db-backup.log</code>. The script dumps the database and writes a <code>.sql.gz</code> file to <code>/var/backups</code>.",
+      info: [
+        "Cron line format: <code>minute hour day month weekday user command</code>. <code>0 2 * * *</code> = 02:00 every day.",
+        "Always read the job's log first: it usually tells you exactly what went wrong.",
+        "<code>ls -l FILE</code> shows permissions such as <code>-rwxr-xr-x</code>: owner, group, others; r = read, w = write, x = execute. A script needs <b>x</b> to be run directly.",
+        "<code>chmod 755 FILE</code> = rwx for the owner, r-x for everyone else (the normal setting for scripts). <code>chmod +x</code> adds execute.",
+        "Avoid <code>chmod 777</code>: it lets <i>anyone</i> edit a script that runs as root.",
+        "Run the script the way cron does: <code>sudo /opt/scripts/db-backup.sh</code>.",
+        "Done when: the script is executable (not world-writable) and today's backup file exists in /var/backups.",
+      ],
+    },
+    "PW-105": {
+      what: "web-01 is very slow. Something is eating the CPU. Find the process responsible and stop it, without stopping the website itself.",
+      context: "Every running program is a <b>process</b> with a PID (process ID). The server should mostly run nginx and parcelwise-api. If one process uses ~100% CPU, everything else has to wait. Ad-hoc jobs started by hand are a common culprit.",
+      info: [
+        "<code>top</code> (or <code>ps aux</code>) lists processes with their %CPU, %MEM, owner and command.",
+        "Read the COMMAND column before killing anything. Is it part of the website, or something else?",
+        "<code>kill PID</code> sends SIGTERM, a polite \"please exit\". Well-behaved programs clean up and stop.",
+        "<code>kill -9 PID</code> sends SIGKILL, which the process can't ignore. Use it only when SIGTERM doesn't work, because the program gets no chance to clean up.",
+        "Check afterwards with <code>ps aux</code> or <code>uptime</code> (load average).",
+        "Done when: the runaway process is gone and nginx and parcelwise-api are still running.",
+      ],
+    },
+    "PW-201": {
+      what: "Sam's tracking-api container exits as soon as it starts. Work out why, then run it properly: on port 8080, with its settings, and set to restart automatically.",
+      context: "docker-01 runs apps as <b>Docker containers</b>. A container is a running instance of an <b>image</b> (the packaged app). Apps get their configuration from <b>environment variables</b>, and tracking-api needs a database URL and a Redis URL. The values are in <code>~/tracking-api.env</code>.",
+      info: [
+        "<code>docker ps</code> shows running containers. <code>docker ps -a</code> also shows stopped and crashed ones, with their exit code.",
+        "<code>docker logs NAME</code> prints what the app wrote before it died. This is almost always where the answer is.",
+        "You can't add env vars to an existing container, so remove it (<code>docker rm NAME</code>) and run a new one.",
+        "<code>docker run</code> flags: <code>-d</code> run in the background, <code>--name NAME</code>, <code>-p HOST:CONTAINER</code> publish a port, <code>-e KEY=VAL</code> or <code>--env-file FILE</code> for settings, <code>--restart unless-stopped</code> to come back after crashes and reboots.",
+        "Check with <code>curl localhost:8080/health</code>.",
+        "Done when: tracking-api is running with DATABASE_URL, answers on :8080/health, and has a restart policy.",
+      ],
+    },
+    "PW-202": {
+      what: "The label-printer web page on docker-01 gives \"connection reset\". The container is running, but traffic isn't reaching the app. Fix how it's exposed so http://localhost (port 80) works.",
+      context: "With <code>-p HOST:CONTAINER</code>, Docker forwards a port on the server to a port inside the container. The app inside must actually listen on that container port. The label UI is built on <b>nginx-unprivileged</b>, which runs as a normal user and therefore listens on <b>8080</b>: ports below 1024 need root.",
+      info: [
+        "The PORTS column in <code>docker ps</code> shows the mapping, e.g. <code>0.0.0.0:80->80/tcp</code> = host 80 → container 80.",
+        "<code>docker logs label-ui</code> and <code>docker inspect label-ui</code> reveal which port the app really listens on.",
+        "\"Connection reset\" or \"empty reply\" on a published port = Docker forwarded it, but nothing inside listens there.",
+        "Port mappings are fixed when the container is created. To change one: <code>docker rm -f label-ui</code>, then <code>docker run</code> again with the right <code>-p</code>.",
+        "Keep the same name, image and restart policy when recreating it.",
+        "Done when: label-ui is running and <code>curl localhost</code> returns the page.",
+      ],
+    },
+    "PW-203": {
+      what: "Security flagged the parcel-web image: it's huge (1.5GB) and runs as root. Rewrite its Dockerfile so the new image <b>parcel-web:2.0</b> is under 300MB and runs as a non-root user, then build it.",
+      context: "A <b>Dockerfile</b> is the recipe for an image: <code>FROM</code> picks a base image, <code>RUN</code> executes commands, <code>COPY</code> adds files, <code>USER</code> sets who the app runs as, and <code>CMD</code> is the start command. The current one uses the full <code>node:22</code> image (~1.1GB with compilers and tools) and installs dev dependencies.",
+      info: [
+        "<b>Multi-stage builds:</b> use several <code>FROM</code>s. Build in the first (<code>FROM node:22 AS build</code>), then start a small final stage (<code>FROM node:22-alpine</code>) and <code>COPY --from=build</code> only the built output.",
+        "Only the final stage ends up in the image, so build tools and dev dependencies stay behind.",
+        "<code>npm ci --omit=dev</code> installs only production dependencies.",
+        "Official node images include a user called <code>node</code>. Add <code>USER node</code> before <code>CMD</code>.",
+        "Edit with <code>nano ~/parcel-web/Dockerfile</code>, build with <code>docker build -t parcel-web:2.0 ~/parcel-web</code>, and check sizes with <code>docker images</code>.",
+        "Done when: parcel-web:2.0 exists, is multi-stage, is under 300MB, and doesn't run as root.",
+      ],
+    },
+    "PW-204": {
+      what: "docker-01 is running out of disk, so builds fail. Free up space, but the two running containers (tracking-api and label-ui) must stay up.",
+      context: "Every build or pull leaves an image on disk. Old versions and <code>&lt;none&gt;</code> \"dangling\" images (left behind when a tag moves to a newer build) pile up on build servers until the disk fills.",
+      info: [
+        "<code>docker system df</code> shows space used by images, containers and volumes, and how much is <i>reclaimable</i>.",
+        "<code>docker images</code> lists every image and its size.",
+        "<code>docker image prune -a -f</code> deletes every image that no container uses. Images used by running containers are kept.",
+        "<code>docker system prune -a -f</code> also removes stopped containers and unused networks.",
+        "Don't stop or remove the running containers to make prune delete more.",
+        "Done when: disk is under 70% and both containers are still running.",
+      ],
+    },
+    "PW-301": {
+      what: "A new version of checkout-api (3.2.0) was deployed to Kubernetes, but the rollout is stuck: the new pod never starts. Find out why and finish the deployment.",
+      context: "In Kubernetes, a <b>Deployment</b> describes what should run (image, replicas). It creates <b>pods</b>, the running containers. On an update it does a <b>rolling update</b>: it starts a new pod and waits for it to be Ready before removing an old one. That's why the old version still serves traffic.",
+      info: [
+        "<code>kubectl get pods</code> lists pods and their STATUS. Look for anything not <code>Running</code>.",
+        "<code>kubectl describe pod NAME</code> shows the pod's details. The <b>Events</b> at the bottom explain what went wrong.",
+        "<b>ImagePullBackOff</b> = Kubernetes can't download the image: wrong name or tag, it doesn't exist, or no permission.",
+        "Fix the Deployment, not the pod (pods are recreated from the Deployment): <code>kubectl set image deploy/NAME CONTAINER=IMAGE:TAG</code>.",
+        "<code>kubectl rollout status deploy/NAME</code> waits for the rollout to finish.",
+        "Done when: checkout-api runs 3.2.0 with all pods Ready, and /checkout works.",
+      ],
+    },
+    "PW-302": {
+      what: "The /track page returns 503 even though the tracking-api pods are running. Find where the request chain breaks and fix it.",
+      context: "A request travels <b>Ingress → Service → Endpoints → Pods</b>. The <b>Ingress</b> routes by hostname and path to a <b>Service</b>. The Service picks pods using a <b>label selector</b> (e.g. <code>app: tracking-api</code>), and the pods it finds become its <b>endpoints</b>. No endpoints means nowhere to send traffic, so the ingress replies 503.",
+      info: [
+        "<code>kubectl get endpoints NAME</code>: <code>&lt;none&gt;</code> means the Service matches no ready pods.",
+        "<code>kubectl describe svc NAME</code> shows its Selector. <code>kubectl get pods --show-labels</code> shows the pods' labels. They must match exactly.",
+        "<code>kubectl edit svc NAME</code> opens the live Service as YAML. Change it and save.",
+        "Test from the bastion: <code>curl http://shop.parcelwise.test/track</code>.",
+        "Done when: the Service has endpoints and /track returns 200.",
+      ],
+    },
+    "PW-303": {
+      what: "The new notify service keeps crashing (CrashLoopBackOff). A ConfigMap with its SMTP (email) settings already exists. Find what's missing and wire it up.",
+      context: "A <b>ConfigMap</b> stores non-secret settings as key/value pairs, separate from the image. That way the same image can run in test and prod. A ConfigMap does nothing until a Deployment <i>references</i> it, either as environment variables or as files.",
+      info: [
+        "<b>CrashLoopBackOff</b> = the container starts, exits, and Kubernetes keeps restarting it with growing delays.",
+        "<code>kubectl logs POD --previous</code> shows the output of the crashed container. Look for which setting is missing.",
+        "<code>kubectl get cm notify-config -o yaml</code> shows what's in the ConfigMap.",
+        "In <code>kubectl edit deploy notify</code>, under the container (same indentation as <code>image:</code>), add:<br><code>envFrom:</code><br><code>- configMapRef:</code><br><code>&nbsp;&nbsp;&nbsp;&nbsp;name: notify-config</code>",
+        "YAML is indentation-sensitive: use spaces, not tabs.",
+        "Done when: all notify pods are Running and Ready, using notify-config.",
+      ],
+    },
+    "PW-304": {
+      what: "label-renderer restarts constantly. Find the reason and give it the resources it needs, sensibly sized.",
+      context: "Each container can have <b>resources</b>. <b>requests</b> is what the scheduler reserves for it; <b>limits</b> is the maximum it may use. If a container uses more memory than its limit, the kernel kills it immediately: <b>OOMKilled</b> (Out Of Memory), exit code 137. Kubernetes restarts it, it fills up again, and the loop repeats.",
+      info: [
+        "<code>kubectl describe pod NAME</code>: look for <b>Last State: Terminated, Reason: OOMKilled</b> and the current Limits.",
+        "Memory units: <code>Mi</code> = mebibytes, <code>Gi</code> = gibibytes (1Gi = 1024Mi).",
+        "This app needs about 300Mi, so set the limit with headroom (e.g. 512Mi) and a realistic request (e.g. 384Mi).",
+        "Edit with <code>kubectl edit deploy label-renderer</code> → <code>resources.requests.memory</code> and <code>resources.limits.memory</code>.",
+        "Don't just set something enormous: limits that are too big waste node capacity.",
+        "Done when: pods are Ready with a limit between 384Mi and 2Gi and a request of at least 256Mi.",
+      ],
+    },
+    "PW-305": {
+      what: "Payments started failing right after payments-api 4.0.0 was deployed. Customers can't pay. Restore service as fast as possible.",
+      context: "During an incident the priority is <b>stop the bleeding first, investigate later</b>. Kubernetes keeps a history of each Deployment's previous versions (<b>revisions</b>), so you can go back to the last good one in seconds. Here the new pods are healthy (they start and pass health checks), but the code has a bug.",
+      info: [
+        "<code>kubectl logs deploy/payments-api</code> confirms the errors started with the new version.",
+        "<code>kubectl rollout history deploy/NAME</code> lists revisions and their images.",
+        "<code>kubectl rollout undo deploy/NAME</code> goes back to the previous revision. Add <code>--to-revision=N</code> for a specific one.",
+        "<code>kubectl rollout status deploy/NAME</code> waits until it's done. Then test with <code>curl http://shop.parcelwise.test/pay</code>.",
+        "Done when: payments-api runs 3.9.2, all pods are Ready, and /pay returns 200.",
+      ],
+    },
+    "PW-306": {
+      what: "search-api pods are Running but never become Ready (0/1), so they get no traffic. The logs look fine. Find out why they're not Ready and fix it.",
+      context: "Kubernetes uses <b>probes</b> to check containers. The <b>readinessProbe</b> answers \"can this pod take traffic?\": if it fails, the pod is removed from the Service's endpoints, but not restarted. The <b>livenessProbe</b> answers \"is it stuck?\": if it fails, the container is restarted. An HTTP probe calls a path and expects a 200–399 status.",
+      info: [
+        "READY <code>0/1</code> with status Running and no restarts usually means the readiness probe is failing.",
+        "<code>kubectl describe pod NAME</code> → Events: \"Readiness probe failed: HTTP probe failed with statuscode: 404\" means the path doesn't exist.",
+        "Compare the readiness and liveness probe paths in <code>kubectl get deploy search-api -o yaml</code>. The liveness probe works.",
+        "Fix it with <code>kubectl edit deploy search-api</code> → <code>readinessProbe.httpGet.path</code>.",
+        "Done when: all search-api pods are Ready and the readiness probe uses /healthz.",
+      ],
+    },
+    "PW-401": {
+      what: "The new status page at status.parcelwise.test shows a plain nginx 404, even though its pods and Service are healthy. Make the site reachable.",
+      context: "An <b>Ingress</b> is a set of routing rules (host + path → Service). It only takes effect when an <b>ingress controller</b> (here, ingress-nginx) picks it up, which it does by <code>ingressClassName</code>. If the class doesn't match a controller, nobody serves the rule, and the controller answers with its default 404.",
+      info: [
+        "<code>kubectl get ingress</code> shows each Ingress's CLASS, HOSTS and ADDRESS. A missing ADDRESS is a clue.",
+        "<code>kubectl get ingressclass</code> lists the classes that actually exist in the cluster.",
+        "Compare with the working <code>shop</code> Ingress: <code>kubectl get ingress shop -o yaml</code>.",
+        "Fix it with <code>kubectl edit ingress status-page</code>.",
+        "Done when: status-page uses an existing class and <code>curl http://status.parcelwise.test</code> returns 200.",
+      ],
+    },
+    "PW-402": {
+      what: "checkout-api's database password is stored in a ConfigMap, which many people can read. Move it into a Secret called <b>checkout-db</b>, point the app at the Secret, and remove the password from the ConfigMap, without breaking checkout.",
+      context: "<b>ConfigMaps</b> are for ordinary settings. <b>Secrets</b> are for credentials: they can be locked down with RBAC (who can read them) and encrypted at rest. Secret values are base64-<i>encoded</i>, which is not encryption. Right now the Deployment loads everything from <code>checkout-config</code> with <code>envFrom</code>.",
+      info: [
+        "Order matters for zero downtime: <b>1)</b> create the Secret, <b>2)</b> make the Deployment read it, <b>3)</b> remove the key from the ConfigMap, <b>4)</b> restart the pods.",
+        "<code>kubectl create secret generic checkout-db --from-literal=DB_PASSWORD='VALUE'</code>. Use single quotes so the shell doesn't touch the <code>!</code>.",
+        "To read one key from a Secret into an env var, add under the container:<br><code>env:</code><br><code>- name: DB_PASSWORD</code><br><code>&nbsp;&nbsp;valueFrom:</code><br><code>&nbsp;&nbsp;&nbsp;&nbsp;secretKeyRef: {name: checkout-db, key: DB_PASSWORD}</code>",
+        "Alternatively, add <code>- secretRef: {name: checkout-db}</code> to the existing <code>envFrom</code> list.",
+        "Pods only read env vars at start-up: <code>kubectl rollout restart deploy/checkout-api</code>.",
+        "<code>kubectl get secret checkout-db -o yaml</code> shows the base64 value; <code>kubectl describe secret</code> hides it.",
+        "Done when: the Secret holds the right password, the ConfigMap doesn't, the app reads it from the Secret, and checkout works.",
+      ],
+    },
+    "PW-403": {
+      what: "Black Friday traffic has made the storefront slow. Add capacity now, and set up autoscaling so it copes with future spikes on its own.",
+      context: "Each storefront pod <b>requests</b> 250m CPU (a quarter of a core). When pods use far more than that, they compete for CPU and responses slow down. A <b>HorizontalPodAutoscaler (HPA)</b> watches average CPU use (as a % of the request) and adds or removes pods to keep it near a target.",
+      info: [
+        "<code>kubectl top pods</code> shows the current CPU (in millicores, <code>m</code>) and memory per pod.",
+        "Rough maths: total CPU ÷ 250m = how many pods you need to keep each one at or under its request.",
+        "<code>kubectl autoscale deploy storefront --min=3 --max=10 --cpu-percent=60</code> creates an HPA: never fewer than 3 pods, at most 10, aiming for 60% of the request.",
+        "<code>kubectl get hpa</code> shows current vs target utilisation and replica counts.",
+        "<code>kubectl scale deploy storefront --replicas=N</code> is a manual fix, but it won't react to the next spike.",
+        "Done when: an HPA exists with min ≥ 3 and enough Ready pods to bring CPU per pod under 250m.",
+      ],
+    },
+  };
+  window.OD.TICKETS.forEach((t) => { t.brief = B[t.id]; });
+})();

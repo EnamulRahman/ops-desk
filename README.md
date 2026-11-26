@@ -13,7 +13,7 @@ Everything runs in the browser. There are no real servers, no accounts and no bu
 | Platform Engineer | Kubernetes: ImagePullBackOff, Service selector, CrashLoopBackOff/ConfigMap, OOMKilled, rollback, readiness probe | 6 |
 | Senior SRE | Ingress class, moving a password into a Secret, HPA for a traffic spike | 3 |
 
-Each ticket has a runbook, three hints (each costs 20% of the ticket's XP), and a debrief explaining what a senior engineer would want you to take away.
+Each ticket has a briefing (what's being asked, background, and the concepts and commands you need), a runbook, three free hints (nudge, closer, full answer), and a debrief explaining what a senior engineer would want you to take away.
 
 ## What's simulated
 
@@ -53,13 +53,14 @@ js/linux.js         shell + Linux commands, services, processes
 js/docker.js        Docker simulator
 js/k8s.js           Kubernetes simulator
 js/tickets.js       the Parcelwise story: tickets, runbooks, hints, graders, debriefs
+js/briefs.js        per-ticket briefings: what's asked, background, helpful info
 js/game.js          UI: landing page, desk, terminal, editor, grading, progress
 vendor/js-yaml.min.js  YAML parser (MIT, see vendor/JS-YAML-LICENSE)
 ```
 
 ## Adding a ticket
 
-Add an object to `OD.TICKETS` in `js/tickets.js` with `setup()` (build a broken world with `OD.newHost`, `OD.addService`, `OD.addDocker`, `OD.addK8s`), `checks(state)` (a list of `{label, ok}`), a `sop`, three `hints` and a `debrief`. Then add its solution to `test/solutions.js` and run the tests.
+Add an object to `OD.TICKETS` in `js/tickets.js` with `setup()` (build a broken world with `OD.newHost`, `OD.addService`, `OD.addDocker`, `OD.addK8s`), `checks(state)` (a list of `{label, ok}`), a `sop`, three `hints` and a `debrief`, plus a briefing in `js/briefs.js`. Then add its solution to `test/solutions.js` and run the tests.
 
 ---
 
