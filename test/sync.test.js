@@ -8,7 +8,7 @@ const URL = process.env.OD_URL || "http://localhost:8765/";
   const done = (p) => p.evaluate(() => Object.keys(OD.game.progress().done).sort().join(","));
   const laptop = await device(), phone = await device();
   await solve(laptop.p, ["PW-101", "PW-102", "PW-103"]); await solve(phone.p, ["PW-104"]);
-  await laptop.p.evaluate(() => OD.game.render());
+  await laptop.p.evaluate(() => { OD.game.progress().current = "PW-103"; OD.game.render(); });
   await laptop.p.click("#sync");
   if (!(await laptop.p.locator(".qr svg").count())) { console.log("✗ no QR code"); fail++; }
   const link = await laptop.p.inputValue("#sl");
@@ -17,6 +17,8 @@ const URL = process.env.OD_URL || "http://localhost:8765/";
   const toast = await phone.p.locator(".toast").innerText();
   const a = await done(phone.p);
   console.log(a === "PW-101,PW-102,PW-103,PW-104" ? "✓" : "✗", "phone after opening laptop link:", a, "|", toast); if (a !== "PW-101,PW-102,PW-103,PW-104") fail++;
+  const cur = await phone.p.locator(".tk.on").getAttribute("data-id");
+  console.log(cur === "PW-103" ? "✓" : "✗", "phone opens on the laptop's current ticket:", cur); if (cur !== "PW-103") fail++;
   if (phone.p.url().includes("#sync")) { console.log("✗ hash not cleared"); fail++; }
   // reverse: paste the phone's code into the laptop
   const code = await phone.p.evaluate(() => OD.game.exportCode());

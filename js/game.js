@@ -247,7 +247,7 @@ $ curl -s localhost/health
   // ------------------------------------------------------------------ sync between devices (no server: progress travels in a link)
   const b64 = { enc: (str) => btoa(unescape(encodeURIComponent(str))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""),
     dec: (str) => decodeURIComponent(escape(atob(str.replace(/-/g, "+").replace(/_/g, "/")))) };
-  const exportCode = () => "OD1." + b64.enc(JSON.stringify({ n: P.name, d: Object.entries(P.done).map(([id, d]) => [id, d.xp, d.at || 0]) }));
+  const exportCode = () => "OD1." + b64.enc(JSON.stringify({ n: P.name, c: P.current, d: Object.entries(P.done).map(([id, d]) => [id, d.xp, d.at || 0]) }));
   const syncLink = () => `${location.origin}${location.pathname}#sync=${exportCode()}`;
   // Merge another device's progress into this one. Returns how many tickets were new here, or -1 if the code is invalid.
   function importCode(raw) {
@@ -262,6 +262,7 @@ $ curl -s localhost/health
       if (!mine || x > mine.xp) P.done[id] = { xp: Math.min(x, byId[id].xp), at: at || Date.now() };
     }
     if (!P.name && typeof data.n === "string") P.name = data.n.slice(0, 24);
+    if (byId[data.c]) P.current = data.c; // pick up where the other device left off
     P.started = true; save(); return added;
   }
   function syncSheet() {
