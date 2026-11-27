@@ -76,7 +76,7 @@ $ curl -s localhost/health
   let pane = "ticket"; // mobile tab
   function desk() {
     document.body.className = "desk";
-    const r = rank(), cur = byId[P.current] && unlocked(byId[P.current]) ? byId[P.current] : T.find((t) => unlocked(t) && !P.done[t.id]) || T[0];
+    const r = rank(), cur = Object.hasOwn(byId, P.current) && unlocked(byId[P.current]) ? byId[P.current] : T.find((t) => unlocked(t) && !P.done[t.id]) || T[0];
     P.current = cur.id; save();
     const nextNeed = ticketsOfRank(r).filter((t) => !P.done[t.id]).length;
     const total = T.reduce((a, t) => a + t.xp, 0);
@@ -256,13 +256,13 @@ $ curl -s localhost/health
     if (!data || !Array.isArray(data.d)) return -1;
     let added = 0;
     for (const [id, x, at] of data.d) {
-      if (!byId[id] || typeof x !== "number") continue;
-      const mine = P.done[id];
+      if (!Object.hasOwn(byId, id) || typeof x !== "number" || !(x >= 0)) continue;
+      const mine = Object.hasOwn(P.done, id) ? P.done[id] : undefined;
       if (!mine) added++;
       if (!mine || x > mine.xp) P.done[id] = { xp: Math.min(x, byId[id].xp), at: at || Date.now() };
     }
     if (!P.name && typeof data.n === "string") P.name = data.n.slice(0, 24);
-    if (byId[data.c]) P.current = data.c; // pick up where the other device left off
+    if (Object.hasOwn(byId, data.c)) P.current = data.c; // pick up where the other device left off
     P.started = true; save(); return added;
   }
   function syncSheet() {
