@@ -6,12 +6,34 @@
   const SAVE_KEY = "opsdesk.v1";
 
   // ------------------------------------------------------------------ progress (localStorage, best effort)
+  const T = OD.TICKETS, byId = Object.fromEntries(T.map((t) => [t.id, t]));
+  // Look a ticket up by id, own properties only, so ids like "__proto__" or "constructor" never match.
+  const ticket = (id) => (typeof id === "string" && Object.prototype.hasOwnProperty.call(byId, id) ? byId[id] : null);
+  const NAME_MAX = 24;
+  const cleanName = (n) => (typeof n === "string" ? n.trim().slice(0, NAME_MAX) : "");
+  const cleanXp = (x, t) => (typeof x === "number" && Number.isFinite(x) ? Math.min(Math.max(Math.round(x), 0), t.xp) : t.xp);
+  const cleanAt = (at) => (typeof at === "number" && Number.isFinite(at) && at > 0 ? at : 0);
+
   const blank = () => ({ name: "", done: {}, hints: {}, current: null, started: false });
+  // Saved progress is treated as untrusted input: keep only known fields with the expected types.
+  function cleanProgress(raw) {
+    const p = blank();
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return p;
+    p.name = cleanName(raw.name);
+    if (raw.done && typeof raw.done === "object" && !Array.isArray(raw.done)) {
+      for (const id of Object.keys(raw.done)) {
+        const t = ticket(id), d = raw.done[id];
+        if (t && d && typeof d === "object") p.done[id] = { xp: cleanXp(d.xp, t), at: cleanAt(d.at) };
+      }
+    }
+    if (ticket(raw.current)) p.current = raw.current;
+    p.started = raw.started === true;
+    return p;
+  }
   let P = blank();
-  try { P = { ...blank(), ...JSON.parse(localStorage.getItem(SAVE_KEY) || "{}") }; } catch { /* private mode etc. */ }
+  try { P = cleanProgress(JSON.parse(localStorage.getItem(SAVE_KEY) || "{}")); } catch { /* private mode, corrupt save etc. */ }
   const save = () => { try { localStorage.setItem(SAVE_KEY, JSON.stringify(P)); } catch { /* ignore */ } };
 
-  const T = OD.TICKETS, byId = Object.fromEntries(T.map((t) => [t.id, t]));
   const xp = () => Object.values(P.done).reduce((a, d) => a + d.xp, 0);
   const ticketsOfRank = (r) => T.filter((t) => t.rank === r);
   const rankDone = (r) => ticketsOfRank(r).every((t) => P.done[t.id]);
@@ -70,20 +92,20 @@ $ curl -s localhost/health
       <section class="ladder">${OD.RANKS.map((r, i) => `<div class="rung"><span class="rn">${i + 1}</span><h3>${r.title}</h3><p>${r.blurb}</p><small>${ticketsOfRank(i).length} tickets</small></div>`).join("")}</section>
       <section class="how"><div><h3>🎫 Real tickets</h3><p>Disk full, crashlooping pods, a broken nginx config, a leaked password. These are the problems on-call engineers actually get paged for.</p></div><div><h3>🖥️ Real tools</h3><p>A simulated shell with pipes, sudo, systemd, Docker and kubectl. Read logs, edit configs in an editor, and roll deployments back.</p></div><div><h3>✅ Graded on outcomes</h3><p>Hit <b>Resolve</b> and the grader inspects the world: is the site up, is the pod Ready, is the secret out of the ConfigMap?</p></div></section>
       <footer class="lfoot">Parcelwise and its staff are fictional. Ops Desk is an independent learning project.</footer>`;
-    $("#start").onsubmit = (e) => { e.preventDefault(); P.name = $("#nm").value.trim(); P.started = true; save(); render(); };
+    $("#start").onsubmit = (e) => { e.preventDefault(); P.name = cleanName($("#nm").value); P.started = true; save(); render(); };
   }
 
   let pane = "ticket"; // mobile tab
   function desk() {
     document.body.className = "desk";
-    const r = rank(), cur = byId[P.current] && unlocked(byId[P.current]) ? byId[P.current] : T.find((t) => unlocked(t) && !P.done[t.id]) || T[0];
+    const r = rank(), cur = ticket(P.current) && unlocked(ticket(P.current)) ? ticket(P.current) : T.find((t) => unlocked(t) && !P.done[t.id]) || T[0];
     P.current = cur.id; save();
     const nextNeed = ticketsOfRank(r).filter((t) => !P.done[t.id]).length;
     const total = T.reduce((a, t) => a + t.xp, 0);
     app.innerHTML = `
       <header class="top">
         <div class="logo"><span class="logo-mark">▣</span> Ops Desk <small>· Parcelwise</small></div>
-        <div class="me"><span class="rank">${OD.RANKS[r].title}</span><div class="xpbar" title="${xp()} / ${total} XP"><div style="width:${Math.round((xp() / total) * 100)}%"></div></div><span class="xpn">${xp()} XP</span></div>
+        <div class="me"><span class="rank">${OD.RANKS[r].title}</span><div class="xpbar" title="${xp()} / ${total} XP"><div></div></div><span class="xpn">${xp()} XP</span></div>
         <div class="acts"><button class="btn sm" id="sync" title="Continue on another device">☁️ <span class="bl">Sync</span></button><button class="btn sm" id="binder" title="Command reference">📒 <span class="bl">Binder</span></button><button class="btn sm ghost" id="menu" title="Back to the start page">⌂</button></div>
       </header>
       <nav class="tabs" role="tablist">${["queue", "ticket", "runbook"].map((k) => `<button role="tab" data-p="${k}" class="${pane === k ? "on" : ""}">${{ queue: "Inbox", ticket: "Terminal", runbook: "Guide" }[k]}</button>`).join("")}</nav>
@@ -128,7 +150,8 @@ $ curl -s localhost/health
       </div>
       <div id="modal" class="modal" hidden></div>`;
 
-    // wiring
+    // wiring (the bar width is set here, not in an inline style="", so the CSP can forbid inline styles)
+    $(".xpbar > div").style.width = `${Math.min(100, Math.round((xp() / total) * 100))}%`;
     app.querySelectorAll(".tabs button").forEach((b) => (b.onclick = () => { pane = b.dataset.p; $(".grid").dataset.pane = pane; app.querySelectorAll(".tabs button").forEach((x) => x.classList.toggle("on", x === b)); if (pane === "ticket") $("#cmd").focus(); }));
     app.querySelectorAll(".tk").forEach((b) => (b.onclick = () => { P.current = b.dataset.id; pane = "ticket"; save(); render(); }));
     $("#menu").onclick = () => { P.started = false; save(); render(); };
@@ -249,22 +272,40 @@ $ curl -s localhost/health
     dec: (str) => decodeURIComponent(escape(atob(str.replace(/-/g, "+").replace(/_/g, "/")))) };
   const exportCode = () => "OD1." + b64.enc(JSON.stringify({ n: P.name, c: P.current, d: Object.entries(P.done).map(([id, d]) => [id, d.xp, d.at || 0]) }));
   const syncLink = () => `${location.origin}${location.pathname}#sync=${exportCode()}`;
-  // Merge another device's progress into this one. Returns how many tickets were new here, or -1 if the code is invalid.
-  function importCode(raw) {
-    const m = String(raw).trim().match(/OD1\.([A-Za-z0-9_-]+)/); if (!m) return -1;
-    let data; try { data = JSON.parse(b64.dec(m[1])); } catch { return -1; }
-    if (!data || !Array.isArray(data.d)) return -1;
+  const SYNC_MAX = 20000; // a real sync link is a few hundred characters; refuse anything absurdly long
+  // Decode a sync link or code into clean, validated data. Returns null if it isn't a valid code.
+  // Everything in a link is untrusted: only known ticket ids are kept and every value is type-checked.
+  function parseCode(raw) {
+    const str = String(raw);
+    if (str.length > SYNC_MAX) return null;
+    const m = str.trim().match(/OD1\.([A-Za-z0-9_-]+)/); if (!m) return null;
+    let data; try { data = JSON.parse(b64.dec(m[1])); } catch { return null; }
+    if (!data || typeof data !== "object" || Array.isArray(data) || !Array.isArray(data.d)) return null;
+    const best = new Map(); // one entry per ticket, keeping the highest XP
+    for (const e of data.d) {
+      if (!Array.isArray(e)) continue;
+      const t = ticket(e[0]);
+      if (!t || typeof e[1] !== "number" || !Number.isFinite(e[1])) continue;
+      const x = cleanXp(e[1], t), prev = best.get(t.id);
+      if (!prev || x > prev.xp) best.set(t.id, { id: t.id, xp: x, at: cleanAt(e[2]) });
+    }
+    return { name: cleanName(data.n), current: ticket(data.c) ? data.c : null, done: [...best.values()] };
+  }
+  // Merge another device's progress into this one. Returns how many tickets were new here.
+  function mergeCode(data) {
     let added = 0;
-    for (const [id, x, at] of data.d) {
-      if (!byId[id] || typeof x !== "number") continue;
+    for (const { id, xp: x, at } of data.done) {
       const mine = P.done[id];
       if (!mine) added++;
-      if (!mine || x > mine.xp) P.done[id] = { xp: Math.min(x, byId[id].xp), at: at || Date.now() };
+      if (!mine || x > mine.xp) P.done[id] = { xp: x, at: at || Date.now() };
     }
-    if (!P.name && typeof data.n === "string") P.name = data.n.slice(0, 24);
-    if (byId[data.c]) P.current = data.c; // pick up where the other device left off
+    if (!P.name && data.name) P.name = data.name;
+    if (data.current) P.current = data.current; // pick up where the other device left off
     P.started = true; save(); return added;
   }
+  // Used by the paste box (a deliberate action) and the tests. Returns tickets added, or -1 if the code is invalid.
+  function importCode(raw) { const data = parseCode(raw); return data ? mergeCode(data) : -1; }
+  const syncedMsg = (r) => (r ? `Synced: ${r} ticket${r === 1 ? "" : "s"} added from your other device.` : "Synced. You were already up to date.");
   function syncSheet() {
     const m = $("#modal"); m.hidden = false;
     const link = syncLink(), web = /^https?:$/.test(location.protocol);
@@ -284,22 +325,53 @@ $ curl -s localhost/health
     const close = () => { m.hidden = true; render(); };
     $("#sc").onclick = close; m.onclick = (e) => { if (e.target === m) close(); };
     $("#scp").onclick = async () => { const v = $("#sl").value; try { await navigator.clipboard.writeText(v); } catch { $("#sl").select(); document.execCommand("copy"); } flash("Copied. Now open it on your other device."); };
-    $("#sld").onclick = () => { const r = importCode($("#si").value); if (r < 0) { flash("That doesn't look like an Ops Desk sync link or code.", true); return; } m.hidden = true; render(); flash(r ? `Synced: ${r} ticket${r === 1 ? "" : "s"} added from your other device.` : "Synced. You were already up to date."); };
+    $("#sld").onclick = () => { const r = importCode($("#si").value); if (r < 0) { flash("That doesn't look like an Ops Desk sync link or code.", true); return; } m.hidden = true; render(); flash(syncedMsg(r)); };
   }
-  // opening a sync link: merge, then tidy the address bar
-  function syncFromHash(rerender) {
+  // Opening a sync link: ask before merging, so a link someone else sends you can't change your
+  // progress without your say-so. The link is removed from the address bar either way.
+  let closeAsk = null;
+  function syncFromHash() {
     if (!/^#sync=/.test(location.hash)) return;
-    const r = importCode(location.hash);
+    const data = parseCode(location.hash);
     try { history.replaceState(null, "", location.pathname + location.search); } catch { /* ignore */ }
-    if (rerender) { const m = $("#modal"); if (m) m.hidden = true; render(); }
-    setTimeout(() => flash(r < 0 ? "That sync link looks damaged. Try copying it again." : r ? `Synced: ${r} ticket${r === 1 ? "" : "s"} added from your other device.` : "Synced. You were already up to date.", r < 0), 300);
+    if (closeAsk) closeAsk();
+    if (!data) { flash("That sync link looks damaged. Try copying it again.", true); return; }
+    const n = data.done.length, ask = document.createElement("div");
+    ask.className = "modal syncask";
+    ask.innerHTML = `<div class="sheet win" role="alertdialog" aria-modal="true" aria-labelledby="sa-h" aria-describedby="sa-b">
+      <h3 id="sa-h">☁️ Merge progress from this link?</h3>
+      <div id="sa-b"><p>This sync link holds <b>${n}</b> solved ticket${n === 1 ? "" : "s"}. Merging adds them to the progress saved in this browser and never removes anything.</p>
+      <p class="dim">Only merge a link you made yourself on your other device.</p></div>
+      <div class="row"><button class="btn primary" id="sa-ok">Merge progress</button><button class="btn ghost" id="sa-no">Cancel</button></div></div>`;
+    const onKey = (e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); finish(false); } };
+    const close = () => { ask.remove(); document.removeEventListener("keydown", onKey, true); closeAsk = null; };
+    const finish = (ok) => {
+      close();
+      if (!ok) { flash("Sync cancelled. Nothing was changed."); return; }
+      const r = mergeCode(data), m = $("#modal"); if (m) m.hidden = true;
+      render(); flash(syncedMsg(r));
+    };
+    ask.onclick = (e) => { if (e.target === ask) finish(false); };
+    document.body.appendChild(ask);
+    $("#sa-ok", ask).onclick = () => finish(true);
+    $("#sa-no", ask).onclick = () => finish(false);
+    document.addEventListener("keydown", onKey, true);
+    closeAsk = close;
+    $("#sa-no", ask).focus();
   }
-  syncFromHash(false);
-  window.addEventListener("hashchange", () => syncFromHash(true));
 
   function flash(msg, bad) { const d = document.createElement("div"); d.className = "toast" + (bad ? " bad" : ""); d.textContent = msg; document.body.appendChild(d); setTimeout(() => d.remove(), 3200); }
   document.addEventListener("keydown", (e) => { const m = $("#modal"); if (e.key === "Escape" && m && !m.hidden && !$("#edt")) { m.hidden = true; render(); } });
 
   OD.game = { render, progress: () => P, exportCode, importCode, reset: () => { P = blank(); save(); Object.keys(worlds).forEach((k) => delete worlds[k]); render(); }, world: (id) => world(byId[id]).s };
-  render();
+  // Refuse to run inside another site's frame (clickjacking). GitHub Pages can't send the
+  // X-Frame-Options / frame-ancestors headers that would normally do this, and a <meta> CSP can't either.
+  if (window.top !== window.self) {
+    document.body.className = "framed";
+    app.innerHTML = `<p>Ops Desk only runs in its own tab. <a href="${esc(location.href.split("#")[0])}" target="_blank" rel="noopener noreferrer">Open Ops Desk</a></p>`;
+  } else {
+    render();
+    syncFromHash();
+    window.addEventListener("hashchange", syncFromHash);
+  }
 })();

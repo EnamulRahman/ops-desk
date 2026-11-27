@@ -13,7 +13,7 @@ const URL = process.env.OD_URL || "http://localhost:8765/";
   if (!(await laptop.p.locator(".qr svg").count())) { console.log("✗ no QR code"); fail++; }
   const link = await laptop.p.inputValue("#sl");
   if (process.env.SHOTS) await laptop.p.screenshot({ path: process.env.SHOTS + "/sync.png" });
-  await phone.p.goto(link); await phone.p.waitForSelector(".toast");
+  await phone.p.goto(link); await phone.p.click("#sa-ok"); await phone.p.waitForSelector(".toast");
   const toast = await phone.p.locator(".toast").innerText();
   const a = await done(phone.p);
   console.log(a === "PW-101,PW-102,PW-103,PW-104" ? "✓" : "✗", "phone after opening laptop link:", a, "|", toast); if (a !== "PW-101,PW-102,PW-103,PW-104") fail++;

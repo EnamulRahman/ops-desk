@@ -17,7 +17,7 @@ Each ticket has a briefing (what's being asked, background, and the concepts and
 
 ## Playing on more than one device
 
-Progress is saved in your browser. To carry it to another device, press **☁️ Sync**. You can scan the QR code with your phone, or copy the link and send it to yourself. Opening the link on the other device **merges** progress, so you can sync either way as often as you like. It's free and needs no account: the progress travels inside the link itself (`#sync=…`, never sent to a server), and nothing is stored online.
+Progress is saved in your browser. To carry it to another device, press **☁️ Sync**. You can scan the QR code with your phone, or copy the link and send it to yourself. Opening the link on the other device asks you to confirm, then **merges** progress, so you can sync either way as often as you like. It's free and needs no account: the progress travels inside the link itself (`#sync=…`, never sent to a server), and nothing is stored online.
 
 ## What's simulated
 
@@ -44,9 +44,20 @@ node test/engine.test.js      # every ticket starts broken and its reference sol
 node test/ui.test.js          # plays all 18 tickets through the real UI (needs Playwright + Chromium)
 node test/wrong.test.js       # tempting-but-wrong fixes are rejected
 node test/sync.test.js        # two browsers sync progress both ways (serve the folder on :8765 first)
+node test/security.test.js    # hostile input can't run script, sync links need consent, CSP and frame protection hold
 ```
 
 `test/solutions.js` contains the reference solutions. They're spoilers!
+
+## Security
+
+Ops Desk has no server, no accounts and makes no network requests, so there's very little to attack. On top of that:
+
+- **Content-Security-Policy** (in `index.html`): only the site's own scripts and styles can run. Inline scripts, inline event handlers, `eval`, network requests, plugins and form submissions are all blocked, so even a future escaping bug couldn't run injected code.
+- **Everything shown is escaped:** the player's name, terminal input and output, and file contents are always inserted as text.
+- **Sync links are untrusted input:** only known ticket ids are kept, every value is type-checked and clamped, and opening a link asks before merging anything. Saved progress in `localStorage` is validated the same way when it's loaded.
+- **No framing:** the page refuses to run inside another site's `<iframe>` (clickjacking protection, since GitHub Pages can't send `X-Frame-Options`).
+- **Vendored libraries are pinned:** js-yaml 4.3.2 (no known advisories) and qrcode-generator 1.4.4, both copied into `vendor/`, with no CDN.
 
 ## Project layout
 
@@ -60,7 +71,7 @@ js/k8s.js           Kubernetes simulator
 js/tickets.js       the Parcelwise story: tickets, runbooks, hints, graders, debriefs
 js/briefs.js        per-ticket briefings: what's asked, background, helpful info
 js/game.js          UI: landing page, desk, terminal, editor, grading, progress
-vendor/js-yaml.min.js  YAML parser (MIT, see vendor/JS-YAML-LICENSE)
+vendor/js-yaml.min.js  YAML parser, v4.3.2 (MIT, see vendor/JS-YAML-LICENSE)
 vendor/qrcode-generator.js  QR codes for the Sync link (MIT, see vendor/QRCODE-LICENSE)
 ```
 

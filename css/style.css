@@ -177,3 +177,4 @@ body.desk { height: 100%; overflow: hidden; }
 .sync .qr p { margin: 4px 0 0; font-size: 12px; }
 .cp { display: flex; gap: 8px; }
 .cp input { flex: 1; min-width: 0; background: var(--term); border: 1px solid var(--line); color: var(--text); border-radius: 8px; padding: 8px 10px; font: 13px var(--mono); }
+.framed #app { padding: 24px 16px; }
