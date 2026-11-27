@@ -168,3 +168,12 @@ body.desk { height: 100%; overflow: hidden; }
   .in input { font-size: 16px; } /* stop iOS zooming on focus */
 }
 @media (max-width: 520px) { .ladder { grid-template-columns: 1fr; } .rank { font-size: 12px; } }
+
+/* ---------------- sync */
+.sync .bbody { overflow-y: auto; padding: 4px 18px 18px; font-size: 14px; }
+.sync h3 { color: var(--amber); font-size: 14px; margin: 16px 0 6px; }
+.sync .qr { text-align: center; margin: 8px 0; }
+.sync .qr svg { width: 180px; height: 180px; background: #fff; border-radius: 8px; }
+.sync .qr p { margin: 4px 0 0; font-size: 12px; }
+.cp { display: flex; gap: 8px; }
+.cp input { flex: 1; min-width: 0; background: var(--term); border: 1px solid var(--line); color: var(--text); border-radius: 8px; padding: 8px 10px; font: 13px var(--mono); }

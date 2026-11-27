@@ -84,7 +84,7 @@ $ curl -s localhost/health
       <header class="top">
         <div class="logo"><span class="logo-mark">▣</span> Ops Desk <small>· Parcelwise</small></div>
         <div class="me"><span class="rank">${OD.RANKS[r].title}</span><div class="xpbar" title="${xp()} / ${total} XP"><div style="width:${Math.round((xp() / total) * 100)}%"></div></div><span class="xpn">${xp()} XP</span></div>
-        <div class="acts"><button class="btn sm" id="binder" title="Command reference">📒 <span class="bl">Binder</span></button><button class="btn sm ghost" id="menu" title="Back to the start page">⌂</button></div>
+        <div class="acts"><button class="btn sm" id="sync" title="Continue on another device">☁️ <span class="bl">Sync</span></button><button class="btn sm" id="binder" title="Command reference">📒 <span class="bl">Binder</span></button><button class="btn sm ghost" id="menu" title="Back to the start page">⌂</button></div>
       </header>
       <nav class="tabs" role="tablist">${["queue", "ticket", "runbook"].map((k) => `<button role="tab" data-p="${k}" class="${pane === k ? "on" : ""}">${{ queue: "Inbox", ticket: "Terminal", runbook: "Guide" }[k]}</button>`).join("")}</nav>
       <div class="grid" data-pane="${pane}">
@@ -132,6 +132,7 @@ $ curl -s localhost/health
     app.querySelectorAll(".tabs button").forEach((b) => (b.onclick = () => { pane = b.dataset.p; $(".grid").dataset.pane = pane; app.querySelectorAll(".tabs button").forEach((x) => x.classList.toggle("on", x === b)); if (pane === "ticket") $("#cmd").focus(); }));
     app.querySelectorAll(".tk").forEach((b) => (b.onclick = () => { P.current = b.dataset.id; pane = "ticket"; save(); render(); }));
     $("#menu").onclick = () => { P.started = false; save(); render(); };
+    $("#sync").onclick = syncSheet;
     $("#binder").onclick = binder;
     $("#msg").onclick = () => $("#msg").classList.toggle("open");
     $("#reset").onclick = () => { delete worlds[cur.id]; render(); flash("World rebuilt. Everything is broken again. 😈"); };
@@ -243,9 +244,61 @@ $ curl -s localhost/health
     $("#bc").onclick = close; m.onclick = (e) => { if (e.target === m) close(); };
   }
 
+  // ------------------------------------------------------------------ sync between devices (no server: progress travels in a link)
+  const b64 = { enc: (str) => btoa(unescape(encodeURIComponent(str))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""),
+    dec: (str) => decodeURIComponent(escape(atob(str.replace(/-/g, "+").replace(/_/g, "/")))) };
+  const exportCode = () => "OD1." + b64.enc(JSON.stringify({ n: P.name, d: Object.entries(P.done).map(([id, d]) => [id, d.xp, d.at || 0]) }));
+  const syncLink = () => `${location.origin}${location.pathname}#sync=${exportCode()}`;
+  // Merge another device's progress into this one. Returns how many tickets were new here, or -1 if the code is invalid.
+  function importCode(raw) {
+    const m = String(raw).trim().match(/OD1\.([A-Za-z0-9_-]+)/); if (!m) return -1;
+    let data; try { data = JSON.parse(b64.dec(m[1])); } catch { return -1; }
+    if (!data || !Array.isArray(data.d)) return -1;
+    let added = 0;
+    for (const [id, x, at] of data.d) {
+      if (!byId[id] || typeof x !== "number") continue;
+      const mine = P.done[id];
+      if (!mine) added++;
+      if (!mine || x > mine.xp) P.done[id] = { xp: Math.min(x, byId[id].xp), at: at || Date.now() };
+    }
+    if (!P.name && typeof data.n === "string") P.name = data.n.slice(0, 24);
+    P.started = true; save(); return added;
+  }
+  function syncSheet() {
+    const m = $("#modal"); m.hidden = false;
+    const link = syncLink(), web = /^https?:$/.test(location.protocol);
+    let qr = "";
+    if (web && window.qrcode) { try { const q = window.qrcode(0, "L"); q.addData(link); q.make(); qr = q.createSvgTag({ cellSize: 4, margin: 2, scalable: true }); } catch { qr = ""; } }
+    const n = Object.keys(P.done).length;
+    m.innerHTML = `<div class="sheet sync" role="dialog" aria-modal="true" aria-label="Sync progress"><div class="ed-h"><b>☁️ Continue on another device</b><span class="sp"></span><button class="btn sm ghost" id="sc">Close</button></div>
+      <div class="bbody">
+        <p>Your progress (${n} ticket${n === 1 ? "" : "s"}, ${xp()} XP) lives in this browser. To carry it over, open this link on your other device. Progress <b>merges</b>, so nothing is lost and you can sync in either direction as often as you like. It's free and private: no account, and nothing is stored on a server.</p>
+        ${qr ? `<div class="qr">${qr}<p class="dim">Scan with your phone's camera.</p></div>` : ""}
+        <h3>1 · Send yourself this link</h3>
+        <div class="cp"><input id="sl" readonly value="${esc(web ? link : exportCode())}" aria-label="Sync link"><button class="btn sm primary" id="scp">Copy</button></div>
+        <p class="dim">${web ? "Paste it into a note, email or message to yourself, then open it on the other device." : "You're running from a local file, so this is a code rather than a link. Paste it into the box below on the other device."}</p>
+        <h3>2 · Or paste a link/code from another device</h3>
+        <div class="cp"><input id="si" placeholder="https://…#sync=OD1.…  or  OD1.…" aria-label="Paste a sync link or code"><button class="btn sm" id="sld">Load</button></div>
+      </div></div>`;
+    const close = () => { m.hidden = true; render(); };
+    $("#sc").onclick = close; m.onclick = (e) => { if (e.target === m) close(); };
+    $("#scp").onclick = async () => { const v = $("#sl").value; try { await navigator.clipboard.writeText(v); } catch { $("#sl").select(); document.execCommand("copy"); } flash("Copied. Now open it on your other device."); };
+    $("#sld").onclick = () => { const r = importCode($("#si").value); if (r < 0) { flash("That doesn't look like an Ops Desk sync link or code.", true); return; } m.hidden = true; render(); flash(r ? `Synced: ${r} ticket${r === 1 ? "" : "s"} added from your other device.` : "Synced. You were already up to date."); };
+  }
+  // opening a sync link: merge, then tidy the address bar
+  function syncFromHash(rerender) {
+    if (!/^#sync=/.test(location.hash)) return;
+    const r = importCode(location.hash);
+    try { history.replaceState(null, "", location.pathname + location.search); } catch { /* ignore */ }
+    if (rerender) { const m = $("#modal"); if (m) m.hidden = true; render(); }
+    setTimeout(() => flash(r < 0 ? "That sync link looks damaged. Try copying it again." : r ? `Synced: ${r} ticket${r === 1 ? "" : "s"} added from your other device.` : "Synced. You were already up to date.", r < 0), 300);
+  }
+  syncFromHash(false);
+  window.addEventListener("hashchange", () => syncFromHash(true));
+
   function flash(msg, bad) { const d = document.createElement("div"); d.className = "toast" + (bad ? " bad" : ""); d.textContent = msg; document.body.appendChild(d); setTimeout(() => d.remove(), 3200); }
   document.addEventListener("keydown", (e) => { const m = $("#modal"); if (e.key === "Escape" && m && !m.hidden && !$("#edt")) { m.hidden = true; render(); } });
 
-  OD.game = { render, progress: () => P, reset: () => { P = blank(); save(); Object.keys(worlds).forEach((k) => delete worlds[k]); render(); }, world: (id) => world(byId[id]).s };
+  OD.game = { render, progress: () => P, exportCode, importCode, reset: () => { P = blank(); save(); Object.keys(worlds).forEach((k) => delete worlds[k]); render(); }, world: (id) => world(byId[id]).s };
   render();
 })();

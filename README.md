@@ -15,6 +15,10 @@ Everything runs in the browser. There are no real servers, no accounts and no bu
 
 Each ticket has a briefing (what's being asked, background, and the concepts and commands you need), a runbook, three free hints (nudge, closer, full answer), and a debrief explaining what a senior engineer would want you to take away.
 
+## Playing on more than one device
+
+Progress is saved in your browser. To carry it to another device, press **☁️ Sync**. You can scan the QR code with your phone, or copy the link and send it to yourself. Opening the link on the other device **merges** progress, so you can sync either way as often as you like. It's free and needs no account: the progress travels inside the link itself (`#sync=…`, never sent to a server), and nothing is stored online.
+
 ## What's simulated
 
 - **Linux shell:** pipes, `&&`/`||`/`;`, redirects, globs, `sudo`, file permissions, users/groups, systemd services and journal, processes and signals, `df`/`du`/`lsof`, `curl`, and a nano/vim-style editor.
@@ -39,6 +43,7 @@ To host it on GitHub Pages: Settings → Pages → *Deploy from a branch* → `m
 node test/engine.test.js      # every ticket starts broken and its reference solution passes the grader
 node test/ui.test.js          # plays all 18 tickets through the real UI (needs Playwright + Chromium)
 node test/wrong.test.js       # tempting-but-wrong fixes are rejected
+node test/sync.test.js        # two browsers sync progress both ways (serve the folder on :8765 first)
 ```
 
 `test/solutions.js` contains the reference solutions. They're spoilers!
@@ -56,6 +61,7 @@ js/tickets.js       the Parcelwise story: tickets, runbooks, hints, graders, deb
 js/briefs.js        per-ticket briefings: what's asked, background, helpful info
 js/game.js          UI: landing page, desk, terminal, editor, grading, progress
 vendor/js-yaml.min.js  YAML parser (MIT, see vendor/JS-YAML-LICENSE)
+vendor/qrcode-generator.js  QR codes for the Sync link (MIT, see vendor/QRCODE-LICENSE)
 ```
 
 ## Adding a ticket
