@@ -12,7 +12,7 @@
   };
 
   OD.addDocker = (s, d) => {
-    s.docker = { images: [], containers: [], apps: {}, ...d };
+    s.docker = { images: [], containers: [], apps: {}, volumes: [], ...d };
     s.docker.images.forEach((i) => { i.id = i.id || OD.hash(i.repo + i.tag).padEnd(12, "0").slice(0, 12); i.size = i.size * OD.MB; });
     s.docker.containers.forEach((c) => { c.id = c.id || OD.hash(c.name).padEnd(12, "a").slice(0, 12); evalContainer(s, c); });
     if (!s.groups.docker) s.groups.docker = ["ops"];
@@ -45,6 +45,7 @@
     if (sub === "container") sub = rest.shift();
     else if (sub === "image") { const v = rest.shift(); sub = { prune: "image-prune", ls: "images", rm: "rmi" }[v] || v; }
     else if (sub === "system") sub = "system-" + rest.shift();
+    else if (sub === "volume") sub = "volume-" + (rest.shift() || "ls");
     const h = D[sub];
     if (!h) return { out: `docker: '${sub || ""}' is not a docker command.\nSee 'docker --help'`, code: 1 };
     return h(s, rest, ctx);
@@ -60,9 +61,9 @@
   D.logs = (s, args) => { const { pos } = parseArgs(args, ["n", "tail"]); const c = findC(s, pos[0]); if (!c) return { out: `Error response from daemon: No such container: ${pos[0]}`, code: 1 }; return (c.logs || []).join("\n"); };
   D.inspect = (s, args) => {
     const { pos } = parseArgs(args, ["f", "format"]); const c = findC(s, pos[0]);
-    if (c) return JSON.stringify([{ Id: c.id + "e1f0c9…", Name: "/" + c.name, State: { Status: c.status, Running: c.status === "running", ExitCode: c.exitCode }, Config: { Image: c.image, User: app(s, c.image).user || "", Env: Object.entries(c.env || {}).map(([k, v]) => `${k}=${v}`), ExposedPorts: { [`${app(s, c.image).port || 80}/tcp`]: {} } }, HostConfig: { PortBindings: Object.fromEntries((c.ports || []).map((p) => [`${p.container}/tcp`, [{ HostIp: "", HostPort: String(p.host) }]])), RestartPolicy: { Name: c.restart || "no" } } }], null, 2);
+    if (c) return JSON.stringify([{ Id: c.id + "e1f0c9…", Name: "/" + c.name, State: { Status: c.status, Running: c.status === "running", ExitCode: c.exitCode }, Mounts: (c.volumes || []).map((v) => (v.source.startsWith("/") ? { Type: "bind", Source: v.source, Destination: v.target } : { Type: "volume", Name: v.source, Source: `/var/lib/docker/volumes/${v.source}/_data`, Destination: v.target })), Config: { Image: c.image, User: app(s, c.image).user || "", Env: Object.entries(c.env || {}).map(([k, v]) => `${k}=${v}`), ExposedPorts: { [`${app(s, c.image).port || 80}/tcp`]: {} } }, HostConfig: { PortBindings: Object.fromEntries((c.ports || []).map((p) => [`${p.container}/tcp`, [{ HostIp: "", HostPort: String(p.host) }]])), RestartPolicy: { Name: c.restart || "no" } } }], null, 2);
     const i = findImg(s, pos[0]);
-    if (i) return JSON.stringify([{ Id: "sha256:" + i.id, RepoTags: [imgRef(i)], Size: i.size, Config: { User: i.user || "", ExposedPorts: { [`${app(s, imgRef(i)).port || 80}/tcp`]: {} } } }], null, 2);
+    if (i) return JSON.stringify([{ Id: "sha256:" + i.id, RepoTags: [imgRef(i)], Size: i.size, Config: { User: i.user || "", Env: Object.entries(i.env || {}).map(([k, v]) => `${k}=${v}`), ExposedPorts: { [`${app(s, imgRef(i)).port || 80}/tcp`]: {} }, ...(i.volumes ? { Volumes: Object.fromEntries(i.volumes.map((v) => [v, {}])) } : {}) } }], null, 2);
     return { out: `Error: No such object: ${pos[0]}`, code: 1 };
   };
   D.stop = (s, args) => args.map((r) => { const c = findC(s, r); if (!c) return `Error response from daemon: No such container: ${r}`; c.status = "exited"; c.exitCode = 0; c.manualStop = true; return r; }).join("\n");
@@ -76,12 +77,13 @@
   D.run = (s, args) => {
     const { flags, pos } = parseArgs(args, ["name", "p", "e", "env", "restart", "v", "env-file", "u", "user", "network"]);
     // collect repeated -p / -e flags manually
-    const ports = [], env = {};
+    const ports = [], env = {}, volumes = [];
     for (let i = 0; i < args.length; i++) {
       if (args[i] === "-p" || args[i] === "--publish") { const [h, c] = String(args[i + 1]).split(":"); ports.push({ host: +h, container: +(c || h) }); i++; }
       else if (/^-p\d/.test(args[i])) { const [h, c] = args[i].slice(2).split(":"); ports.push({ host: +h, container: +(c || h) }); }
       else if (args[i] === "-e" || args[i] === "--env") { const [k, ...v] = String(args[i + 1]).split("="); env[k] = v.join("="); i++; }
       else if (args[i].startsWith("--env=")) { const [k, ...v] = args[i].slice(6).split("="); env[k] = v.join("="); }
+      else if (args[i] === "-v" || args[i] === "--volume") { const [src, dst] = String(args[i + 1]).split(":"); if (src && dst) volumes.push({ source: src, target: dst }); i++; }
     }
     if (flags["env-file"]) { const f = s.fs.get(s.fs.norm(s.cwd, flags["env-file"])); if (!f) return { out: `docker: open ${flags["env-file"]}: no such file or directory.`, code: 125 }; f.content.split("\n").forEach((l) => { const m = l.match(/^\s*([A-Z0-9_]+)=(.*)$/); if (m) env[m[1]] = m[2]; }); }
     const image = pos[0]; if (!image) return { out: '"docker run" requires at least 1 argument.', code: 125 };
@@ -90,7 +92,8 @@
     const name = flags.name || ["eager", "brave", "quirky", "sleepy"][s.tick % 4] + "_" + ["turing", "hopper", "lovelace", "torvalds"][s.tick % 4];
     if (findC(s, name)) return { out: `docker: Error response from daemon: Conflict. The container name "/${name}" is already in use by container "${findC(s, name).id}". You have to remove (or rename) that container to be able to reuse that name.`, code: 125 };
     for (const p of ports) { const clash = s.docker.containers.find((c) => c.status === "running" && (c.ports || []).some((x) => x.host === p.host)); if (clash) return { out: `docker: Error response from daemon: driver failed programming external connectivity on endpoint ${name}: Bind for 0.0.0.0:${p.host} failed: port is already allocated.`, code: 125 }; }
-    const c = { id: OD.hash(name + s.tick).padEnd(12, "c").slice(0, 12), name, image: imgRef(img), ports, env, restart: flags.restart, created: "Less than a second ago", up: "Less than a second", status: "running" };
+    for (const v of volumes) if (!v.source.startsWith("/") && !s.docker.volumes.includes(v.source)) s.docker.volumes.push(v.source);
+    const c = { id: OD.hash(name + s.tick).padEnd(12, "c").slice(0, 12), name, image: imgRef(img), ports, env: { ...(img.env || {}), ...env }, volumes, restart: flags.restart, created: "Less than a second ago", up: "Less than a second", status: "running" };
     s.docker.containers.push(c); evalContainer(s, c);
     if (flags.rm && c.status !== "running") s.docker.containers = s.docker.containers.filter((x) => x !== c);
     return flags.d || flags.detach ? c.id + "e1f0c9d2a7b4" : (c.logs || []).join("\n");
@@ -128,6 +131,16 @@
   };
   D.pull = (s, args) => { const ref = args[0] || ""; const base = BASES[ref] || BASES[ref + ":latest"]; if (!base) return { out: `Error response from daemon: manifest for ${ref} not found: manifest unknown`, code: 1 }; const [repo, tag = "latest"] = ref.split(":"); if (!findImg(s, ref)) s.docker.images.push({ repo, tag, size: base * OD.MB, id: OD.hash(ref).padEnd(12, "0").slice(0, 12), created: "3 weeks ago" }); return `${tag}: Pulling from library/${repo}\nStatus: Downloaded newer image for ${repo}:${tag}`; };
 
+  D.history = (s, args) => {
+    const { pos } = parseArgs(args); const i = pos[0] && findImg(s, pos[0].includes(":") ? pos[0] : pos[0] + ":latest");
+    if (!i) return { out: `Error response from daemon: No such image: ${pos[0] || ""}`, code: 1 };
+    const rows = [...(i.layers || [])].reverse().map((l, n) => [n ? "<missing>" : i.id, i.created || "2 weeks ago", (/^RUN\b/i.test(l) ? "RUN /bin/sh -c " + l.slice(4) : /^(COPY|ADD)\b/i.test(l) ? l : "/bin/sh -c #(nop) " + l), /^(RUN|COPY|ADD)\b/i.test(l) ? "12.4MB" : "0B"]);
+    return table([["IMAGE", "CREATED", "CREATED BY", "SIZE"], ...rows, [rows.length ? "<missing>" : i.id, "3 weeks ago", `FROM ${i.base || "base image"}`, human(Math.max(0, i.size - (i.layers || []).length * 12 * OD.MB)) + "B"]], 3);
+  };
+  D["volume-ls"] = (s) => table([["DRIVER", "VOLUME NAME"], ...s.docker.volumes.map((v) => ["local", v])], 4);
+  D["volume-create"] = (s, args) => { const n = args.find((a) => !a.startsWith("-")); if (!n) return { out: "Tip: docker volume create NAME", code: 1 }; if (!s.docker.volumes.includes(n)) s.docker.volumes.push(n); return n; };
+  D["volume-inspect"] = (s, args) => { const n = args[0]; if (!s.docker.volumes.includes(n)) return { out: `Error response from daemon: get ${n}: no such volume`, code: 1 }; return JSON.stringify([{ Driver: "local", Mountpoint: `/var/lib/docker/volumes/${n}/_data`, Name: n, Scope: "local" }], null, 2); };
+
   // ---- docker build: lint the Dockerfile and estimate the resulting image
   D.build = (s, args) => {
     const { flags, pos } = parseArgs(args, ["t", "f", "tag", "file", "platform"]);
@@ -145,11 +158,12 @@
         const prev = stages.find((st) => st.name === m[1]);
         const base = prev ? null : BASES[m[1]] ?? BASES[m[1] + ":latest"];
         if (!prev && base === undefined) return { out: `ERROR: failed to solve: ${m[1]}: failed to resolve source metadata for docker.io/library/${m[1]}: docker.io/library/${m[1]}: not found`, code: 1 };
-        stages.push({ name: m[2], base: m[1], size: prev ? prev.size : base, user: "root", files: 0 });
+        stages.push({ name: m[2], base: m[1], size: prev ? prev.size : base, user: prev ? prev.user : "root", env: prev ? { ...prev.env } : {}, lines: [] });
       } else if (!stages.length) return { out: "ERROR: failed to solve: no build stage in current context", code: 1 };
       else {
         const st = stages[stages.length - 1];
         if (I === "USER") st.user = rest;
+        if (I === "ENV") { const kv = rest.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:=|\s+)(.*)$/); if (kv) st.env[kv[1]] = kv[2].replace(/^"(.*)"$/, "$1"); }
         if (I === "RUN" && /(npm (ci|install)|pnpm install|yarn)/.test(rest)) st.size += /--omit=dev|--production|--prod/.test(rest) ? 70 : 380;
         if (I === "RUN" && /npm run build|pnpm (run )?build/.test(rest)) st.size += 20;
         if (I === "RUN" && /apt-get install|apk add/.test(rest)) st.size += /--no-cache|rm -rf \/var\/lib\/apt/.test(rest) ? 15 : 60;
@@ -159,12 +173,13 @@
           else st.size += /\s\.\s+\.?/.test(" " + rest + " ") || /^\.\s/.test(rest) ? 45 : 12;
         }
       }
+      if (I !== "FROM") stages[stages.length - 1].lines.push(l);
       step++; out.push(` => [${stages.length > 1 ? (stages[stages.length - 1].name || "stage-" + (stages.length - 1)) + " " : ""}${step}/${lines.length}] ${l.slice(0, 70)}`);
     }
     const fin = stages[stages.length - 1];
     const [repo, t = "latest"] = tag.split(":");
     s.docker.images = s.docker.images.filter((i) => !(i.repo === repo && i.tag === t));
-    s.docker.images.push({ repo, tag: t, size: Math.round(fin.size) * OD.MB, id: OD.hash(df.content + tag).padEnd(12, "0").slice(0, 12), created: "Less than a second ago", user: fin.user === "root" || fin.user === "0" ? "" : fin.user, stages: stages.length, base: fin.base });
+    s.docker.images.push({ repo, tag: t, size: Math.round(fin.size) * OD.MB, id: OD.hash(df.content + tag).padEnd(12, "0").slice(0, 12), created: "Less than a second ago", user: fin.user === "root" || fin.user === "0" ? "" : fin.user, stages: stages.length, base: fin.base, env: fin.env, layers: fin.lines });
     s.docker.apps[`${repo}:${t}`] = { ...(s.docker.apps[repo] || {}), user: fin.user === "root" || fin.user === "0" ? "root" : fin.user };
     out.push(` => exporting to image`, ` => => naming to docker.io/library/${repo}:${t}`);
     return out.join("\n");

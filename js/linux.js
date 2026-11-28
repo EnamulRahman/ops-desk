@@ -198,17 +198,20 @@
     }).join("\n");
   };
   C.less = C.more = C.cat;
+  const readable = (ctx, f) => !(f.mode.slice(-1) === "0" && f.owner !== ctx.state.user && !isRoot(ctx));
   const readInput = (ctx, file) => {
     if (!file) return ctx.stdin || "";
     const f = ctx.state.fs.get(P(ctx, file));
+    if (f && !readable(ctx, f)) return { denied: true };
     return f ? f.content.replace(/\n$/, "") : null;
   };
   C.head = C.tail = (ctx) => {
     const { flags, pos } = parseArgs(ctx.args, ["n"]);
     let n = 10; const num = ctx.args.find((a) => /^-\d+$/.test(a)); if (num) n = +num.slice(1); if (flags.n) n = +flags.n;
-    const files = pos.filter((p) => !/^\d+$/.test(p) || flags.n === undefined);
+    const files = pos.filter((p) => !/^-\d+$/.test(p) && (!/^\d+$/.test(p) || flags.n === undefined));
     const txt = readInput(ctx, files[0]);
     if (txt === null) return { out: `${ctx.name}: cannot open '${files[0]}' for reading: No such file or directory`, code: 1 };
+    if (txt && txt.denied) return { out: `${ctx.name}: cannot open '${files[0]}' for reading: Permission denied`, code: 1 };
     const lines = txt.split("\n");
     return ctx.name === "head" ? lines.slice(0, n).join("\n") : lines.slice(-n).join("\n");
   };
@@ -222,14 +225,14 @@
     if (!files.length) scan(ctx.stdin || "");
     for (const f of files) {
       const p = P(ctx, f);
-      if (s.fs.isDir(p)) { if (flags.r || flags.R) s.fs.walk(p).filter((x) => !x.dir).forEach((x) => scan(s.fs.get(x.p).content, x.p)); else results.push(`grep: ${f}: Is a directory`); }
-      else if (s.fs.isFile(p)) scan(s.fs.get(p).content, files.length > 1 ? f : "");
+      if (s.fs.isDir(p)) { if (flags.r || flags.R) s.fs.walk(p).filter((x) => !x.dir).forEach((x) => (readable(ctx, s.fs.get(x.p)) ? scan(s.fs.get(x.p).content, x.p) : results.push(`grep: ${x.p}: Permission denied`))); else results.push(`grep: ${f}: Is a directory`); }
+      else if (s.fs.isFile(p)) { if (readable(ctx, s.fs.get(p))) scan(s.fs.get(p).content, files.length > 1 ? f : ""); else results.push(`grep: ${f}: Permission denied`); }
       else results.push(`grep: ${f}: No such file or directory`);
     }
     if (flags.c) return String(results.length);
     return { out: results.join("\n"), code: results.length ? 0 : 1 };
   };
-  C.wc = (ctx) => { const { flags, pos } = parseArgs(ctx.args); const t = readInput(ctx, pos[0]) || ""; const lines = t ? t.split("\n").length : 0; return flags.l ? String(lines) : `${lines} ${t.split(/\s+/).filter(Boolean).length} ${t.length}`; };
+  C.wc = (ctx) => { const { flags, pos } = parseArgs(ctx.args); const r = readInput(ctx, pos[0]); if (r && r.denied) return { out: `wc: ${pos[0]}: Permission denied`, code: 1 }; const t = r || ""; const lines = t ? t.split("\n").length : 0; return flags.l ? String(lines) : `${lines} ${t.split(/\s+/).filter(Boolean).length} ${t.length}`; };
   C.sort = (ctx) => { const { flags } = parseArgs(ctx.args); let l = (ctx.stdin || "").split("\n"); l.sort(flags.n ? (a, b) => parseFloat(a) - parseFloat(b) : undefined); if (flags.r) l.reverse(); return l.join("\n"); };
   C.uniq = (ctx) => { const { flags } = parseArgs(ctx.args); const l = (ctx.stdin || "").split("\n"); const out = []; let prev = null, n = 0; for (const x of [...l, null]) { if (x === prev) { n++; continue; } if (prev !== null) out.push(flags.c ? `${String(n).padStart(7)} ${prev}` : prev); prev = x; n = 1; } return out.join("\n"); };
   C.echo = (ctx) => ctx.args.filter((a) => a !== "-e" && a !== "-n").join(" ");
@@ -311,7 +314,7 @@
     return table([["Filesystem", flags.h ? "Size" : "1K-blocks", "Used", "Avail", "Use%", "Mounted on"], ["/dev/root", f(tot), f(used), f(Math.max(0, tot - used)), Math.min(100, OD.diskPct(s)) + "%", "/"], ["tmpfs", f(2 * OD.GB), "0", f(2 * OD.GB), "0%", "/dev/shm"], ["/dev/nvme0n1p15", f(105 * OD.MB), f(6 * OD.MB), f(99 * OD.MB), "6%", "/boot/efi"]], 2);
   };
   C.free = (ctx) => { const { flags } = parseArgs(ctx.args); const v = flags.h ? ["7.6Gi", "2.9Gi", "1.2Gi", "3.5Gi", "4.4Gi"] : ["7953612", "3046120", "1258208", "3649284", "4614792"]; return table([["", "total", "used", "free", "buff/cache", "available"], ["Mem:", ...v], ["Swap:", flags.h ? "0B" : "0", flags.h ? "0B" : "0", flags.h ? "0B" : "0"]], 2); };
-  C.uptime = (ctx) => { const load = ctx.state.procs.some((p) => p.cpu > 90) ? "3.98, 3.91, 3.55" : "0.21, 0.30, 0.28"; return ` 10:31:07 up 41 days,  3:12,  1 user,  load average: ${load}`; };
+  C.uptime = (ctx) => { const load = ctx.state.procs.some((p) => p.cpu > 90) ? "3.98, 3.91, 3.55" : "0.21, 0.30, 0.28"; return ` 10:31:07 up ${ctx.state.uptime || "41 days,  3:12"},  1 user,  load average: ${load}`; };
   C.whoami = (ctx) => (isRoot(ctx) ? "root" : ctx.state.user);
   C.hostname = (ctx) => ctx.state.host;
   C.date = () => "Thu Nov 26 10:31:07 UTC 2026";
@@ -325,9 +328,8 @@
     const s = ctx.state, p = P(ctx, a), f = s.fs.get(p);
     if (!f && !s.fs.isDir(s.fs.parent(p))) return { out: `${ctx.name}: ${a}: No such file or directory`, code: 1 };
     const writable = canWrite(ctx, p);
-    return { editor: { title: p, content: f ? f.content : "", readonly: !writable,
-      note: writable ? "" : `[ Read-only: you need sudo to save ${p} ]`,
-      save: (text) => { s.fs.write(p, text, { size: undefined }); s.fs.get(p).size = undefined; return `Saved ${p}`; } } };
+    return { editor: { title: writable ? p : `${p} (read-only: use sudo to edit)`, content: f ? f.content : "", readOnly: !writable,
+      save: (text) => { if (!writable) return { out: `${ctx.name}: ${p}: Permission denied`, code: 1 }; s.fs.write(p, text, { size: undefined }); s.fs.get(p).size = undefined; return `Saved ${p}`; } } };
   };
   C.nano = C.vim = C.vi = C.edit = (ctx) => EDITABLE(ctx, ctx.args.filter((a) => !a.startsWith("-"))[0]);
 
@@ -382,7 +384,7 @@
   C.top = C.htop = (ctx) => {
     const s = ctx.state, procs = [...s.procs].sort((a, b) => b.cpu - a.cpu);
     const load = procs.some((p) => p.cpu > 90) ? "3.98, 3.91, 3.55" : "0.21, 0.30, 0.28";
-    return [`top - 10:31:07 up 41 days,  1 user,  load average: ${load}`, `Tasks: ${procs.length + 92} total,   ${procs.filter((p) => p.cpu > 50).length + 1} running`, `%Cpu(s): ${procs.reduce((a, p) => a + p.cpu, 0) > 90 ? "99.1 us,  0.6 sy" : " 3.2 us,  0.9 sy"},  0.0 ni`, "", table([["PID", "USER", "%CPU", "%MEM", "COMMAND"], ...procs.map((p) => [p.pid, p.user, p.cpu.toFixed(1), p.mem.toFixed(1), p.cmd])], 2), "", "(snapshot: press q in a real terminal to quit)"].join("\n");
+    return [`top - 10:31:07 up ${s.uptime || "41 days,  3:12"},  1 user,  load average: ${load}`, `Tasks: ${procs.length + 92} total,   ${procs.filter((p) => p.cpu > 50).length + 1} running`, `%Cpu(s): ${procs.reduce((a, p) => a + p.cpu, 0) > 90 ? "99.1 us,  0.6 sy" : " 3.2 us,  0.9 sy"},  0.0 ni`, "", table([["PID", "USER", "%CPU", "%MEM", "COMMAND"], ...procs.map((p) => [p.pid, p.user, p.cpu.toFixed(1), p.mem.toFixed(1), p.cmd])], 2), "", "(snapshot: press q in a real terminal to quit)"].join("\n");
   };
   C.pgrep = (ctx) => { const { flags, pos } = parseArgs(ctx.args); const hits = ctx.state.procs.filter((p) => (flags.f ? p.cmd : p.cmd.split(" ")[0]).includes(pos[0])); return hits.length ? hits.map((p) => (flags.a || flags.l ? `${p.pid} ${p.cmd}` : p.pid)).join("\n") : { out: "", code: 1 }; };
   function killProc(ctx, p, sig) {
@@ -424,7 +426,10 @@
     }
     if (verb === "is-active") return { out: svc.active ? "active" : svc.failed ? "failed" : "inactive", code: svc.active ? 0 : 3 };
     if (verb === "is-enabled") return { out: svc.enabled ? "enabled" : "disabled", code: svc.enabled ? 0 : 1 };
-    if (verb === "enable" || verb === "disable") { svc.enabled = verb === "enable"; return verb === "enable" ? `Created symlink /etc/systemd/system/multi-user.target.wants/${unit}.service → /usr/lib/systemd/system/${unit}.service.` : `Removed "/etc/systemd/system/multi-user.target.wants/${unit}.service".`; }
+    if (verb === "enable" || verb === "disable") {
+      svc.enabled = verb === "enable";
+      if (flags.now) { if (verb === "disable") OD.stopService(s, unit); else if (!svc.active) { const r = OD.startService(s, unit); if (!r.ok) return { out: `Job for ${unit}.service failed because the control process exited with error code.\nSee "systemctl status ${unit}.service" and "journalctl -xeu ${unit}.service" for details.`, code: 1 }; } }
+      return verb === "enable" ? `Created symlink /etc/systemd/system/multi-user.target.wants/${unit}.service → /usr/lib/systemd/system/${unit}.service.` : `Removed "/etc/systemd/system/multi-user.target.wants/${unit}.service".`; }
     if (verb === "stop") { OD.stopService(s, unit); return ""; }
     if (verb === "start" || verb === "restart" || verb === "reload") {
       if (verb === "reload" && !svc.active) return { out: `${unit}.service is not active, cannot reload.`, code: 1 };

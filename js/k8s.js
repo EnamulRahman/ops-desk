@@ -93,11 +93,14 @@
   function desiredReplicas(s, d) {
     const h = s.k8s.hpas.find((x) => x.metadata.namespace === d.metadata.namespace && x.spec.scaleTargetRef.name === d.metadata.name);
     if (!h) return d.spec.replicas ?? 1;
-    const a = appFor(s, d.spec.template.spec.containers[0].image), req = parseCpu((((d.spec.template.spec.containers[0].resources || {}).requests) || {}).cpu) || 100;
+    if ((d.spec.replicas ?? 1) === 0) return 0; // like the real HPA: scaling a target to 0 switches autoscaling off
+    const a = appFor(s, d.spec.template.spec.containers[0].image), req = cpuRequest(d);
+    if (!req) return Math.min(h.spec.maxReplicas, Math.max(h.spec.minReplicas || 1, d.spec.replicas ?? 1)); // no CPU request: utilisation is unknown, so it can't scale
     const target = (h.spec.metrics || [{ resource: { target: { averageUtilization: 80 } } }])[0].resource.target.averageUtilization;
     const want = Math.ceil((a.cpuLoad || 50) / ((req * target) / 100));
     return Math.min(h.spec.maxReplicas, Math.max(h.spec.minReplicas || 1, want));
   }
+  function cpuRequest(d) { return parseCpu((((d.spec.template.spec.containers[0].resources || {}).requests) || {}).cpu); }
   function podAge(s, d, slot) {
     const seen = (s.k8s.seen = s.k8s.seen || {});
     if (!(slot in seen) || s.k8s.gen[slot] !== seen[slot + "#g"]) { seen[slot] = s.tick; seen[slot + "#g"] = s.k8s.gen[slot]; }
@@ -200,7 +203,7 @@
     if (kind === "configmaps") return table([head(["NAME", "DATA", "AGE"]), ...list.map((c) => [...nsCol(c), c.metadata.name, Object.keys(c.data || {}).length, age(c)])], 3);
     if (kind === "secrets") return table([head(["NAME", "TYPE", "DATA", "AGE"]), ...list.map((c) => [...nsCol(c), c.metadata.name, c.type || "Opaque", Object.keys(Object.assign({}, c.data, c.stringData)).length, age(c)])], 3);
     if (kind === "ingresses") return table([head(["NAME", "CLASS", "HOSTS", "ADDRESS", "PORTS", "AGE"]), ...list.map((i) => [...nsCol(i), i.metadata.name, i.spec.ingressClassName || "<none>", (i.spec.rules || []).map((r) => r.host).join(","), s.k8s.ingressClasses.includes(i.spec.ingressClassName) ? "a1b2c3d4e5.elb.eu-west-2.amazonaws.com" : "", i.spec.tls ? "80, 443" : "80", age(i)])], 3);
-    if (kind === "hpas") return table([head(["NAME", "REFERENCE", "TARGETS", "MINPODS", "MAXPODS", "REPLICAS", "AGE"]), ...list.map((h) => { const d = byName(s, "deployments", h.metadata.namespace, h.spec.scaleTargetRef.name); const n = d ? desiredReplicas(s, d) : 0; const a = d ? appFor(s, d.spec.template.spec.containers[0].image) : {}; const req = d ? parseCpu((((d.spec.template.spec.containers[0].resources || {}).requests) || {}).cpu) || 100 : 100; const util = Math.round(((a.cpuLoad || 50) / n / req) * 100); return [...nsCol(h), h.metadata.name, `Deployment/${h.spec.scaleTargetRef.name}`, `cpu: ${util}%/${h.spec.metrics[0].resource.target.averageUtilization}%`, h.spec.minReplicas, h.spec.maxReplicas, n, "12s"]; })], 3);
+    if (kind === "hpas") return table([head(["NAME", "REFERENCE", "TARGETS", "MINPODS", "MAXPODS", "REPLICAS", "AGE"]), ...list.map((h) => { const d = byName(s, "deployments", h.metadata.namespace, h.spec.scaleTargetRef.name); const n = d ? desiredReplicas(s, d) : 0; const a = d ? appFor(s, d.spec.template.spec.containers[0].image) : {}; const req = d ? cpuRequest(d) : null; const util = req && n ? `${Math.round(((a.cpuLoad || 50) / n / req) * 100)}%` : "<unknown>"; return [...nsCol(h), h.metadata.name, `Deployment/${h.spec.scaleTargetRef.name}`, `cpu: ${util}/${h.spec.metrics[0].resource.target.averageUtilization}%`, h.spec.minReplicas, h.spec.maxReplicas, n, h._age || "12s"]; })], 3);
     return { out: `error: listing ${kind} isn't supported in this simulator`, code: 1 };
   };
   function dump(o, fmt) { const clean = OD.clone(o); strip(clean); return fmt === "json" ? JSON.stringify(clean, null, 2) : yaml().dump(clean, { lineWidth: 120, noRefs: true }).trimEnd(); }
@@ -245,7 +248,15 @@
       const data = Object.assign({}, o.data, o.stringData);
       return [`Name:         ${o.metadata.name}`, `Namespace:    ${ns}`, kind === "secrets" ? `Type:         ${o.type || "Opaque"}` : "", "", "Data", "====", ...Object.entries(data).flatMap(([k, v]) => (kind === "secrets" ? [`${k}:  ${(() => { try { return atob(v).length; } catch { return String(v).length; } })()} bytes`] : [`${k}:`, "----", String(v), ""]))].filter((x) => x !== null).join("\n");
     }
-    if (kind === "hpas") return K.get(s, ["hpa", name, "-n", ns]);
+    if (kind === "hpas") {
+      const h = byName(s, kind, ns, name); if (!h) return notFound(kind, name);
+      const d = byName(s, "deployments", ns, h.spec.scaleTargetRef.name), c = d && d.spec.template.spec.containers[0];
+      const known = d && cpuRequest(d), p = d && pods(s, ns).find((x) => x.owner === d);
+      return [K.get(s, ["hpa", name, "-n", ns]), "", "Conditions:", "  Type            Status  Reason", "  ----            ------  ------",
+        `  AbleToScale     True    ${known ? "ReadyForNewScale" : "SucceededGetScale"}`,
+        known ? "  ScalingActive   True    ValidMetricFound" : "  ScalingActive   False   FailedGetResourceMetric",
+        "Events:", known ? "  <none>" : `  Warning  FailedGetResourceMetric  12s (x41 over 20m)  horizontal-pod-autoscaler  failed to get cpu utilization: missing request for cpu in container ${c ? c.name : "?"} of Pod ${p ? p.name : "?"}`].join("\n");
+    }
     if (kind === "nodes") return "Name:  ip-10-0-11-42.eu-west-2.compute.internal\nRoles: <none>\nConditions:\n  Ready   True   KubeletReady   kubelet is posting ready status\nAllocatable:\n  cpu:     1930m\n  memory:  7302072Ki\n  pods:    35";
     return { out: `error: the server doesn't have a resource type "${pos[0] || ""}"`, code: 1 };
   };
@@ -331,6 +342,14 @@
       const p = pods(s, ns).find((x) => x.name === name); if (!p) return notFound("pods", name);
       if (p.slot) { s.k8s.gen[p.slot] = (s.k8s.gen[p.slot] || 0) + 1; return `pod "${name}" deleted`; }
       s.k8s.pods = s.k8s.pods.filter((x) => x.name !== name); return `pod "${name}" deleted`;
+    }
+    if (kind === "namespaces") {
+      if (!name) return { out: "error: resource(s) were provided, but no name was specified", code: 1 };
+      if (["default", "kube-system", "kube-public", "kube-node-lease"].includes(name)) return { out: `Error from server (Forbidden): namespaces "${name}" is forbidden: this namespace may not be deleted`, code: 1 };
+      const kinds = ["deployments", "services", "configmaps", "secrets", "ingresses", "hpas"];
+      if (!kinds.some((k) => s.k8s[k].some((o) => o.metadata.namespace === name))) return { out: `Error from server (NotFound): namespaces "${name}" not found`, code: 1 };
+      kinds.forEach((k) => { s.k8s[k] = s.k8s[k].filter((o) => o.metadata.namespace !== name); });
+      return `namespace "${name}" deleted`;
     }
     const list = s.k8s[kind]; if (!list) return { out: `error: the server doesn't have a resource type "${pos[0] || ""}"`, code: 1 };
     const o = byName(s, kind, ns, name); if (!o) return notFound(kind, name);

@@ -26,7 +26,7 @@ const path = require("path"), SOL = require("./solutions");
     await page.click("#resolve");
     const ok = await page.locator(".win").count();
     if (!ok) { console.log(`✗ ${id}: ${await page.locator("#grade").innerText()}`); fail++; continue; }
-    if (id === "PW-105") await page.screenshot({ path: process.env.SHOTS + "/win.png" });
+    if (id === "PW-105" && process.env.SHOTS) await page.screenshot({ path: process.env.SHOTS + "/win.png" });
     await page.click("#cl");
   }
   const xp = await page.evaluate(() => OD.game.progress());

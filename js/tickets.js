@@ -61,7 +61,7 @@
       "/etc/nginx/nginx.conf": { content: "user www-data;\nworker_processes auto;\ninclude /etc/nginx/sites-enabled/*;\n", owner: "root" },
       "/var/log/nginx/parcelwise.access.log": { content: '10.0.1.17 - - [26/Nov/2026:10:12:44 +0000] "GET / HTTP/1.1" 200 5213\n', owner: "root", mode: "640" },
       "/home/ops/README.txt": { content: "Welcome to web-01 (Parcelwise production web).\nApp: parcelwise-api on :8080 behind nginx on :80.\nLogs: /var/log/parcelwise/ and /var/log/nginx/\n" },
-      ...(opts.files || {}) }, groups: opts.groups });
+      ...(opts.files || {}) }, groups: opts.groups, users: opts.users });
     OD.addService(s, "parcelwise-api", { desc: "Parcelwise API", port: 8080, bind: "127.0.0.1", proc: { cmd: "/usr/local/bin/parcelwise-api --port 8080", user: "www", cpu: 2.1, mem: 6.4 }, holds: ["/var/log/parcelwise/app.log"], active: opts.apiActive !== false });
     OD.addService(s, "nginx", { desc: "A high performance web server and a reverse proxy server", port: 80, proc: { cmd: "nginx: master process /usr/sbin/nginx -g daemon on; master_process on;", user: "root", cpu: 0.1, mem: 0.4 }, check: (st) => { const r = OD.nginxCheck(st); return r.ok ? { ok: true } : { ok: false, journal: [r.err, "nginx: configuration file /etc/nginx/nginx.conf test failed"] }; }, active: opts.nginxActive });
     s.web = (url, st) => {
@@ -93,7 +93,8 @@
   const cm = (name, data) => ({ apiVersion: "v1", kind: "ConfigMap", metadata: { name, namespace: "shop" }, data });
   const REG = {
     "parcelwise/storefront": ["5.4.0", "5.4.1"], "parcelwise/checkout-api": ["3.1.4", "3.2.0"], "parcelwise/tracking-api": ["1.8.0", "1.9.2"],
-    "parcelwise/notify": ["0.9.1"], "parcelwise/label-renderer": ["2.0.3"], "parcelwise/payments-api": ["3.9.2", "4.0.0"], "parcelwise/search-api": ["1.2.0"], "parcelwise/status-page": ["1.0.1"],
+    "parcelwise/notify": ["0.9.1"], "parcelwise/label-renderer": ["2.0.3"], "parcelwise/payments-api": ["3.9.2", "4.0.0", "4.0.1"], "parcelwise/search-api": ["1.2.0"], "parcelwise/status-page": ["1.0.1"],
+    "parcelwise/returns-api": ["1.0.0"], "parcelwise/orders-api": ["2.4.1"], "parcelwise/scanner-gateway": ["2.3.0"],
   };
   const APPS = {
     "parcelwise/storefront": { port: 8080, body: STORE_HTML, cpuLoad: 180, memMi: 160 },
@@ -114,6 +115,9 @@
   const podsOf = (s, name) => OD.k8sPods(s, "shop").filter((p) => p.owner && p.owner.metadata.name === name);
   const allReady = (s, name) => { const ps = podsOf(s, name); return ps.length > 0 && ps.every((p) => p.ev.ready) && ps.every((p) => p.hash === ps[0].hash); };
   const depObj = (s, name) => s.k8s.deployments.find((d) => d.metadata.name === name);
+  const podsIn = (s, ns, name) => OD.k8sPods(s, ns).filter((p) => p.owner && p.owner.metadata.name === name);
+  const cpuM = (v) => (v ? (String(v).endsWith("m") ? +String(v).slice(0, -1) : +v * 1000) : 0);
+  const cronLine = (s, file, cmd) => { const f = s.fs.get(file); const l = f && f.content.split("\n").map((x) => x.trim()).find((x) => x && !x.startsWith("#") && x.includes(cmd)); return l ? l.split(/\s+/) : null; };
   const container = (s, name) => (depObj(s, name) || { spec: { template: { spec: { containers: [{}] } } } }).spec.template.spec.containers[0];
 
   // ------------------------------------------------------------------ the tickets
@@ -186,6 +190,55 @@
       checks: (s) => [check("The runaway export.py process is gone", !s.procs.some((p) => p.cmd.includes("export.py"))), check("parcelwise-api is still running", s.services["parcelwise-api"].active), check("nginx is still running", s.services.nginx.active)],
       debrief: "Find it, identify it, then stop it gently: SIGTERM first, SIGKILL (-9) only if needed, because -9 skips clean-up. Long-running jobs shouldn't share a box with production traffic. Run them on a worker, with <code>nice</code>, or as a scheduled job with resource limits, and tell the person who started it (Omar)." },
 
+    { id: "PW-106", rank: 0, xp: 100, priority: "Critical", from: "tom", title: "502 after last night's patching",
+      message: "web-02 got its security patches and a reboot overnight. Since then customers just get a <b>502 Bad Gateway</b> page. nginx is up, so what's going on? 😟",
+      topic: "systemd",
+      setup: () => {
+        const s = webHost({ host: "web-02", apiActive: false, files: { "/home/ops/README.txt": { content: "Welcome to web-02 (Parcelwise production web).\nApp: parcelwise-api on :8080 behind nginx on :80.\nLogs: /var/log/parcelwise/ and /var/log/nginx/\n" } } });
+        s.services["parcelwise-api"].enabled = false;
+        s.uptime = "47 min";
+        const boot = "-- Boot 7c1e0f2a9b4d4e5f8a6b3c2d1e0f9a8b --";
+        s.journal["parcelwise-api"] = ["systemd[1]: Stopping parcelwise-api.service - Parcelwise API...", "systemd[1]: parcelwise-api.service: Deactivated successfully.", "systemd[1]: Stopped parcelwise-api.service - Parcelwise API.", boot];
+        s.journal.nginx = [boot, "systemd[1]: Starting nginx.service - A high performance web server and a reverse proxy server...", "systemd[1]: Started nginx.service - A high performance web server and a reverse proxy server."];
+        s.fs.write("/var/log/nginx/error.log", '2026/11/26 09:44:02 [error] 811#811: *1 connect() failed (111: Connection refused) while connecting to upstream, client: 10.0.1.17, server: parcelwise.test, request: "GET / HTTP/1.1", upstream: "http://127.0.0.1:8080/", host: "parcelwise.test"\n', { owner: "root", mode: "640" }, true);
+        return s;
+      },
+      sop: ["A 502 from nginx means nginx is fine but the app behind it isn't answering. Check the app: <code>systemctl status parcelwise-api</code>.", "Read the <b>Loaded:</b> line too. <i>disabled</i> means systemd won't start it at boot.", "<code>sudo systemctl start NAME</code> starts it now. <code>sudo systemctl enable NAME</code> starts it on every boot. <code>enable --now</code> does both.", "Verify: <code>curl -I localhost</code> and <code>systemctl is-enabled parcelwise-api</code>."],
+      hints: ["curl localhost gives 502. Is the app on :8080 running? systemctl status parcelwise-api", "It's inactive AND disabled, so it didn't come back after the reboot. Start it, and make it start on boot.", "sudo systemctl enable --now parcelwise-api   then   curl -I localhost"],
+      checks: (s) => [check("parcelwise-api is running", s.services["parcelwise-api"].active), check("parcelwise-api starts on boot (enabled)", s.services["parcelwise-api"].enabled), check("nginx is still running", s.services.nginx.active), check("http://localhost returns 200", http200(s, "http://localhost/"))],
+      debrief: "systemd has two separate switches: <b>start</b> (run it now) and <b>enable</b> (run it at every boot). Starting without enabling fixes today and breaks again on the next reboot, which is how the same incident comes back at 3am. After patching, check every service came back (<code>systemctl --failed</code>), and have monitoring call the real URL, not just check that the server answers ping." },
+
+    { id: "PW-107", rank: 0, xp: 90, priority: "Normal", from: "omar", title: "60 copies of the daily report",
+      message: "Since yesterday I get the daily sales report email <b>60 times</b> every morning, one a minute from 6:00 to 6:59 😅 It should arrive once, at 6:00. Sam changed the cron job on web-01 yesterday to move it from 7 to 6.",
+      topic: "Cron",
+      setup: () => webHost({ files: {
+        "/etc/cron.d/daily-report": { content: "# Daily sales report, emailed to the analytics team\n# m h dom mon dow user command\n* 6 * * * root /opt/reports/daily-report.sh >> /var/log/daily-report.log 2>&1\n", owner: "root" },
+        "/opt/reports/daily-report.sh": { content: "#!/bin/bash\n# Builds yesterday's sales CSV and emails it to analytics@parcelwise.test\n", owner: "root", mode: "755" },
+        "/var/log/daily-report.log": { content: Array.from({ length: 60 }, (_, i) => `2026-11-26 06:${String(i).padStart(2, "0")}:01 report sent to analytics@parcelwise.test (rows: 18412)`).join("\n") + "\n", owner: "root" },
+      } }),
+      sop: ["Read the schedule: <code>cat /etc/cron.d/daily-report</code>. The five time fields are <b>minute hour day-of-month month day-of-week</b>.", "<code>*</code> means 'every'. So <code>* 6 * * *</code> runs every minute of the 6 o'clock hour.", "Edit it with <code>sudo nano /etc/cron.d/daily-report</code>. Files in <code>/etc/cron.d</code> have a <b>user</b> column before the command.", "cron re-reads <code>/etc/cron.d</code> by itself, so no restart is needed."],
+      hints: ["Look at the first field of the schedule line. What does * mean in the minute column?", "* 6 * * * = every minute from 06:00 to 06:59. You want minute 0 only.", "sudo nano /etc/cron.d/daily-report → change '* 6 * * *' to '0 6 * * *' → save"],
+      checks: (s) => { const f = s.fs.get("/etc/cron.d/daily-report"), l = cronLine(s, "/etc/cron.d/daily-report", "/opt/reports/daily-report.sh") || []; return [check("The report job is still scheduled", l.length >= 7), check("It runs once, at minute 0", l[0] === "0" || l[0] === "00"), check("…at 6 in the morning, every day", (l[1] === "6" || l[1] === "06") && l[2] === "*" && l[3] === "*" && l[4] === "*"), check("It still runs as root", l[5] === "root"), check("The cron file isn't writable by everyone", f && !(+f.mode[2] & 2))]; },
+      debrief: "Cron syntax is easy to get subtly wrong: <code>*</code> in the minute field means every minute. Check schedules with a tool like crontab.guru before shipping them, and keep cron files in Git so someone reviews the change. Jobs that send email or charge cards should also be <b>idempotent</b>, meaning a duplicate run doesn't send a duplicate email." },
+
+    { id: "PW-108", rank: 0, xp: 100, priority: "High", from: "maya", title: "Jordan can't log in with their SSH key",
+      message: "Jordan (<b>jlee</b>) still can't SSH into web-01: <code>Permission denied (publickey)</code>. Sam copied their public key into place this morning. Can you sort it out?",
+      topic: "SSH & permissions",
+      setup: () => {
+        const refused = (t, port) => [`sshd[${2200 + port % 97}]: Authentication refused: bad ownership or modes for file /home/jlee/.ssh/authorized_keys`, `sshd[${2200 + port % 97}]: Connection closed by authenticating user jlee 10.0.4.23 port ${port} [preauth]`].map((l) => `Nov 26 ${t} web-01 ${l}`);
+        const lines = [...refused("09:12:40", 51122), ...refused("09:13:05", 51130), "Nov 26 09:20:11 web-01 sshd[2301]: Accepted publickey for ops from 10.0.4.8 port 40022 ssh2: ED25519 SHA256:q1Xv…", ...refused("10:02:51", 52004)];
+        const s = webHost({ users: { jlee: { uid: 1001, home: "/home/jlee", shell: "/bin/bash" } }, groups: { deploy: ["ops", "jlee"], jlee: ["jlee"] }, files: {
+          "/home/jlee/.ssh/authorized_keys": { content: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK3vYw0h9mJq2sT8pXbFzL4cR6nE1uD7oA5iG3wQ0yHk jordan@parcelwise-laptop\n", owner: "root", group: "root", mode: "666" },
+          "/var/log/auth.log": { content: lines.join("\n") + "\n", owner: "root", group: "adm", mode: "640" },
+        } });
+        s.journal.ssh = lines.map((l) => l.replace(/^Nov 26 \S+ web-01 /, ""));
+        return s;
+      },
+      sop: ["Read the SSH server's log: <code>sudo tail /var/log/auth.log</code> (or <code>sudo journalctl -u ssh</code>).", "Check the key file: <code>ls -la /home/jlee/.ssh/</code>. Who owns <code>authorized_keys</code>, and who can write to it?", "sshd ignores a key file that someone other than its user could edit. It must belong to the user and not be writable by group or others.", "<code>sudo chown jlee:jlee FILE</code> and <code>sudo chmod 600 FILE</code>."],
+      hints: ["What does /var/log/auth.log say about jlee? (it's root-only, so use sudo)", "'bad ownership or modes': the file is owned by root and is mode 666, so anyone can write to it.", "sudo chown jlee:jlee /home/jlee/.ssh/authorized_keys && sudo chmod 600 /home/jlee/.ssh/authorized_keys"],
+      checks: (s) => { const f = s.fs.get("/home/jlee/.ssh/authorized_keys"), m = f ? f.mode.split("").map(Number) : [0, 0, 0]; return [check("Jordan's key is still in authorized_keys", f && f.content.includes("jordan@parcelwise-laptop")), check("The file belongs to jlee", f && f.owner === "jlee"), check("Only jlee can change it (not writable by group or others)", f && !(m[1] & 2) && !(m[2] & 2)), check("jlee can still read it", f && m[0] & 4)]; },
+      debrief: "SSH is strict on purpose: if anyone else could edit <code>authorized_keys</code>, they could add their own key and log in as that user. It wants the file owned by the user and not writable by anyone else (600 is normal, and <code>~/.ssh</code> itself should be 700). Files you copy with sudo end up owned by root, so fix the owner afterwards. Better still, manage keys with config management, or avoid them with SSO-based access such as AWS SSM Session Manager." },
+
     // ===================================================== JUNIOR: Docker
     { id: "PW-201", rank: 1, xp: 120, priority: "High", from: "sam", title: "New tracking-api container dies instantly",
       message: "I tried to run tracking-api 1.8.0 on docker-01 but the container exits straight away. The env vars are in ~/tracking-api.env. It needs to be on port 8080, and it should come back if the box reboots.",
@@ -256,6 +309,84 @@
       checks: (s) => { const r = (n) => s.docker.containers.find((c) => c.name === n && c.status === "running"); return [check("Disk usage is below 70%", OD.diskPct(s) < 70), check("tracking-api is still running", r("tracking-api")), check("label-ui is still running", r("label-ui"))]; },
       debrief: "Build servers collect images like a junk drawer. Prune only touches what no container uses, so running services are safe. Automate it (a nightly <code>docker image prune -a --filter until=168h</code>), add ECR lifecycle policies for the registry, and alert on disk before it hits 100%." },
 
+    { id: "PW-205", rank: 1, xp: 120, priority: "High", from: "maya", title: "Status page forgets every incident",
+      message: "Every time we redeploy the status page database on docker-01, all our incident history disappears 😱 It just happened again, so there's nothing in it worth saving right now. Please make sure the next redeploy doesn't wipe it.",
+      topic: "Volumes",
+      setup: () => {
+        const s = OD.newHost({ host: "docker-01", files: { "/home/ops/statuspage-db.env": { content: "POSTGRES_USER=status\nPOSTGRES_PASSWORD=St4tus-db-2026\nPOSTGRES_DB=status\n" } } });
+        const persisted = (c) => (c.volumes || []).some((v) => /^\/var\/lib\/postgresql(\/data)?\/?$/.test(v.target));
+        OD.addDocker(s, {
+          images: [{ repo: "postgres", tag: "16", size: 432, created: "2 weeks ago", base: "debian:bookworm-slim", volumes: ["/var/lib/postgresql/data"], env: { PGDATA: "/var/lib/postgresql/data" }, layers: ["ENV PGDATA=/var/lib/postgresql/data", "VOLUME /var/lib/postgresql/data", "EXPOSE 5432", 'CMD ["postgres"]'] }],
+          apps: { postgres: { port: 5432, requiredEnv: ["POSTGRES_PASSWORD"], cmd: "docker-entrypoint.s…", missingEnvLog: () => ["Error: Database is uninitialized and superuser password is not specified.", "       You must specify POSTGRES_PASSWORD to a non-empty value for the superuser."],
+            boot: ["The files belonging to this database system will be owned by user \"postgres\"."],
+            ready: (c) => [...(persisted(c) ? [] : ["creating directory /var/lib/postgresql/data ... ok", "initdb: creating a brand-new, empty database cluster (no existing data found)"]), "PostgreSQL init process complete; ready for start up.", "LOG:  listening on IPv4 address \"0.0.0.0\", port 5432", "LOG:  database system is ready to accept connections"] } },
+          containers: [{ name: "statuspage-db", image: "postgres:16", env: { PGDATA: "/var/lib/postgresql/data", POSTGRES_USER: "status", POSTGRES_PASSWORD: "St4tus-db-2026", POSTGRES_DB: "status" }, restart: "unless-stopped", created: "25 minutes ago", up: "25 minutes" }],
+        });
+        return s;
+      },
+      sop: ["See how it runs today: <code>docker inspect statuspage-db</code>, and look at <b>Mounts</b>.", "A container's own filesystem is thrown away with the container. Data that must survive goes on a <b>volume</b>.", "<code>docker inspect postgres:16</code> shows which path the image expects you to persist (<b>Volumes</b>).", "Recreate it: <code>docker rm -f</code>, then <code>docker run -d --name … -v VOLUME:/var/lib/postgresql/data --env-file … --restart unless-stopped postgres:16</code>.", "<code>docker volume ls</code> lists named volumes."],
+      hints: ["docker inspect statuspage-db: Mounts is empty. Where does Postgres keep its data?", "The data lives in /var/lib/postgresql/data inside the container. Mount a named volume there, and pass the settings from ~/statuspage-db.env.", "docker rm -f statuspage-db && docker run -d --name statuspage-db -v statuspage-data:/var/lib/postgresql/data --env-file ~/statuspage-db.env --restart unless-stopped postgres:16"],
+      checks: (s) => { const c = s.docker.containers.find((x) => x.name === "statuspage-db"); return [check("statuspage-db is running", c && c.status === "running"), check("Its data directory (/var/lib/postgresql/data) is on a volume", c && (c.volumes || []).some((v) => /^\/var\/lib\/postgresql(\/data)?\/?$/.test(v.target))), check("It still has its database settings", c && c.env && c.env.POSTGRES_PASSWORD === "St4tus-db-2026" && c.env.POSTGRES_DB === "status"), check("It restarts automatically", c && /unless-stopped|always/.test(c.restart || ""))]; },
+      debrief: "Containers are disposable: anything written inside one dies with it. Databases need their data directory on a volume. Named volumes are managed by Docker and survive <code>docker rm</code> (but not <code>docker rm -v</code> or <code>docker volume rm</code>, so be careful). A volume still isn't a backup, so schedule dumps and test restores. In the cloud, a managed database such as RDS takes this whole problem away." },
+
+    { id: "PW-206", rank: 1, xp: 150, priority: "Critical", from: "jess", title: "AWS key baked into an image",
+      message: "🔐 Our secret scanner found AWS credentials inside the <b>parcelwise/payments-worker:1.0</b> image on docker-01. I've already revoked that key and put a new one in <code>~/payments-worker.env</code>. Please rebuild it as <b>1.1</b> with no credentials inside, run it with the new key, and get rid of the leaky image.",
+      topic: "Secrets in images",
+      setup: () => {
+        const old = { AWS_ACCESS_KEY_ID: "AKIAIOSFODNN7EXAMPLE", AWS_SECRET_ACCESS_KEY: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" };
+        const queue = "https://sqs.eu-west-2.amazonaws.com/123456789012/payments";
+        const lines = ["WORKDIR /app", "COPY requirements.txt .", "RUN pip install --no-cache-dir -r requirements.txt", "COPY . .", `ENV QUEUE_URL=${queue}`, `ENV AWS_ACCESS_KEY_ID=${old.AWS_ACCESS_KEY_ID}`, `ENV AWS_SECRET_ACCESS_KEY=${old.AWS_SECRET_ACCESS_KEY}`, "USER 1000", 'CMD ["python", "worker.py"]'];
+        const s = OD.newHost({ host: "docker-01", files: {
+          "/home/ops/payments-worker/Dockerfile": { content: ["FROM python:3.12-slim", ...lines].join("\n") + "\n" },
+          "/home/ops/payments-worker/requirements.txt": { content: "boto3==1.35.60\n" },
+          "/home/ops/payments-worker/worker.py": { content: "# polls the payments queue and settles card payments\nimport boto3\n" },
+          "/home/ops/payments-worker.env": { content: "# rotated by Jess, 26 Nov\nAWS_ACCESS_KEY_ID=AKIAI44QH8DHBEXAMPLE\nAWS_SECRET_ACCESS_KEY=je7MtGbClwBF/2Zp9Utk/h3yCo8nvbEXAMPLEKEY\n" },
+        } });
+        OD.addDocker(s, {
+          images: [{ repo: "parcelwise/payments-worker", tag: "1.0", size: 212, created: "3 weeks ago", user: "1000", base: "python:3.12-slim", env: { QUEUE_URL: queue, ...old }, layers: lines }, { repo: "python", tag: "3.12-slim", size: 155, created: "3 weeks ago" }],
+          apps: { "parcelwise/payments-worker": { port: 8080, user: "1000", requiredEnv: ["QUEUE_URL", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"], cmd: "python worker.py", boot: ['{"level":"info","msg":"payments-worker starting"}'],
+            missingEnvLog: (m) => [`botocore.exceptions.NoCredentialsError: Unable to locate credentials (${m[0]} is not set)`],
+            ready: (c) => [`{"level":"info","msg":"polling queue","queue":"payments","aws_access_key_id":"${c.env.AWS_ACCESS_KEY_ID}"}`] } },
+          containers: [{ name: "payments-worker", image: "parcelwise/payments-worker:1.0", env: { QUEUE_URL: queue, ...old }, restart: "unless-stopped", created: "3 weeks ago", up: "3 weeks" }],
+        });
+        return s;
+      },
+      sop: ["Confirm the leak: <code>docker history parcelwise/payments-worker:1.0</code> or <code>docker inspect</code> the image (Config.Env). Anyone who can pull the image can read these.", "Delete the <code>ENV AWS_…</code> lines from <code>~/payments-worker/Dockerfile</code> and rebuild it as <code>parcelwise/payments-worker:1.1</code>.", "Run the new image with the rotated key from <code>~/payments-worker.env</code> (<code>--env-file</code>), keeping the name and restart policy.", "Remove the old container and the leaky 1.0 image (<code>docker rm -f</code>, <code>docker rmi</code>)."],
+      hints: ["docker history (or docker inspect) on parcelwise/payments-worker:1.0: look for ENV lines.", "Remove both ENV AWS_ lines from ~/payments-worker/Dockerfile, build :1.1, and run it with --env-file ~/payments-worker.env. Then delete the 1.0 image.", "nano ~/payments-worker/Dockerfile (delete the two ENV AWS_ lines) → docker build -t parcelwise/payments-worker:1.1 ~/payments-worker → docker rm -f payments-worker → docker run -d --name payments-worker --env-file ~/payments-worker.env --restart unless-stopped parcelwise/payments-worker:1.1 → docker rmi parcelwise/payments-worker:1.0"],
+      checks: (s) => {
+        const df = (s.fs.get("/home/ops/payments-worker/Dockerfile") || { content: "" }).content, keyEnv = (env) => Object.keys(env || {}).some((k) => /^AWS_(ACCESS_KEY_ID|SECRET_ACCESS_KEY)$/.test(k));
+        const img = s.docker.images.find((i) => i.repo === "parcelwise/payments-worker" && i.tag === "1.1"), c = s.docker.containers.find((x) => x.name === "payments-worker");
+        return [check("The Dockerfile no longer sets AWS credentials", df && !/^\s*(ENV|ARG)\s+AWS_(ACCESS_KEY_ID|SECRET_ACCESS_KEY)\b/m.test(df) && !/AKIA[0-9A-Z]{16}|EXAMPLEKEY/.test(df)),
+          check("Image parcelwise/payments-worker:1.1 is built with no credentials inside", img && !keyEnv(img.env)),
+          check("No image on the box still contains AWS credentials", !s.docker.images.some((i) => keyEnv(i.env))),
+          check("payments-worker is running the 1.1 image", c && c.status === "running" && c.image === "parcelwise/payments-worker:1.1"),
+          check("It uses the new key, passed in at run time", c && c.env && c.env.AWS_ACCESS_KEY_ID === "AKIAI44QH8DHBEXAMPLE" && c.env.AWS_SECRET_ACCESS_KEY === "je7MtGbClwBF/2Zp9Utk/h3yCo8nvbEXAMPLEKEY"),
+          check("It restarts automatically", c && /unless-stopped|always/.test(c.restart || ""))];
+      },
+      debrief: "Every <code>ENV</code>, <code>ARG</code> and copied file becomes part of the image, and layers are just tarballs anyone with pull access can unpack. Deleting the line in a later layer doesn't help either. Pass secrets in at run time (env files, or better a secret store such as AWS Secrets Manager), prefer IAM roles over long-lived keys, and run a secret scanner (gitleaks, trufflehog, Trivy) in CI. Once a key has leaked, <b>rotating it</b> is the real fix, which Jess already did." },
+
+    { id: "PW-207", rank: 1, xp: 110, priority: "Normal", from: "sam", title: "Upgrade tracking-api to 1.9.2",
+      message: "Can you upgrade tracking-api on docker-01 to <b>1.9.2</b>? I tried <code>docker run -d --name tracking-api-new -p 8080:8080 --env-file ~/tracking-api.env parcelwise/tracking-api:1.9.2</code> but Docker says the port is already allocated 🤷 Please keep the container called <b>tracking-api</b>: our monitoring looks for that name.",
+      topic: "Upgrades",
+      setup: () => {
+        const env = { DATABASE_URL: "postgres://tracking:s3cr3t@db.internal:5432/tracking", REDIS_URL: "redis://cache.internal:6379/0", LOG_LEVEL: "info" };
+        const s = OD.newHost({ host: "docker-01", files: { "/home/ops/tracking-api.env": { content: Object.entries(env).map(([k, v]) => `${k}=${v}`).join("\n") + "\n" } } });
+        const app = (v) => ({ port: 8080, requiredEnv: ["DATABASE_URL", "REDIS_URL"], boot: [`> tracking-api@${v} start`, "> node dist/server.js"], ready: () => [`tracking-api ${v} listening on 0.0.0.0:8080`], routes: { "/health": { status: 200, body: '{"status":"ok"}' }, "/version": { status: 200, body: `{"service":"tracking-api","version":"${v}"}` } }, body: `{"service":"tracking-api","version":"${v}"}` });
+        OD.addDocker(s, {
+          images: [{ repo: "parcelwise/tracking-api", tag: "1.8.0", size: 182, created: "5 weeks ago" }, { repo: "parcelwise/tracking-api", tag: "1.9.2", size: 186, created: "2 days ago" }],
+          apps: { "parcelwise/tracking-api:1.8.0": app("1.8.0"), "parcelwise/tracking-api:1.9.2": app("1.9.2") },
+          containers: [{ name: "tracking-api", image: "parcelwise/tracking-api:1.8.0", ports: [{ host: 8080, container: 8080 }], env, restart: "unless-stopped", created: "5 weeks ago", up: "5 weeks" }],
+        });
+        return s;
+      },
+      sop: ["Only one container can publish a given host port. <code>docker ps</code> shows what holds 8080 now.", "Note how the old one is configured (<code>docker inspect tracking-api</code>: env, restart policy) so the new one matches.", "You can't swap the image of an existing container. Stop and remove the old one, then <code>docker run</code> the new version with the same name, port, env and restart policy.", "Check: <code>curl localhost:8080/version</code>. Rolling back would be the same steps with 1.8.0."],
+      hints: ["docker ps: the old tracking-api (1.8.0) still holds 0.0.0.0:8080.", "Remove the old container first (that frees both the port and the name), then run 1.9.2 with the same settings.", "docker rm -f tracking-api && docker run -d --name tracking-api -p 8080:8080 --env-file ~/tracking-api.env --restart unless-stopped parcelwise/tracking-api:1.9.2 && curl localhost:8080/version"],
+      checks: (s) => {
+        const c = s.docker.containers.find((x) => x.name === "tracking-api"), on8080 = s.docker.containers.find((x) => x.status === "running" && (x.ports || []).some((p) => p.host === 8080)), v = OD.http(s, "http://localhost:8080/version");
+        return [check("A container named tracking-api is running 1.9.2", c && c.status === "running" && c.image === "parcelwise/tracking-api:1.9.2"), check("It's the one serving port 8080", c && on8080 === c), check("http://localhost:8080/version reports 1.9.2", !v.error && v.status === 200 && v.body.includes('"1.9.2"')), check("It has its database settings", c && c.env && c.env.DATABASE_URL && c.env.REDIS_URL), check("It restarts automatically", c && /unless-stopped|always/.test(c.restart || "")), check("No 1.8.0 container is still running", !s.docker.containers.some((x) => x.status === "running" && x.image.endsWith(":1.8.0")))];
+      },
+      debrief: "With plain Docker an upgrade means a short gap: stop the old container, start the new one. That's fine for an internal service, but it's why production runs behind an orchestrator or load balancer that starts the new version, health-checks it, and only then drains the old one (a rolling or blue/green deploy). Keep the run command in a Compose file so an upgrade is a one-line tag change, and keep the previous image until the new one has proven itself." },
+
     // ===================================================== PLATFORM: Kubernetes
     { id: "PW-301", rank: 2, xp: 150, priority: "High", from: "sam", title: "checkout-api deploy stuck for 20 minutes",
       message: "I deployed checkout-api 3.2.0 to prod and the rollout is just… stuck? The old pods are still serving at least. Can you check what's wrong with the new ones?",
@@ -311,6 +442,46 @@
       checks: (s) => [check("All search-api pods are Ready", allReady(s, "search-api")), check("The readiness probe uses /healthz", (container(s, "search-api").readinessProbe || { httpGet: {} }).httpGet.path === "/healthz")],
       debrief: "Readiness controls traffic; liveness controls restarts. A wrong readiness path quietly keeps pods out of the Service. Nothing crashes, so look at <b>Events</b>. Use a cheap health endpoint that doesn't depend on the database for liveness." },
 
+    { id: "PW-307", rank: 2, xp: 140, priority: "High", from: "tom", title: "Returns portal: 503 on launch day",
+      message: "The new returns portal went live this morning but <b>shop.parcelwise.test/returns</b> only shows '503 Service Temporarily Unavailable'. Sam swears the pods are Ready AND the Service has endpoints this time 😅",
+      topic: "Service ports",
+      setup: () => k8sHost({ apps: { "parcelwise/returns-api": { port: 8080, routes: { "/returns": { status: 200, body: '{"service":"returns-api","open_returns":37}' } }, logs: ['{"level":"info","msg":"returns-api 1.0.0 starting"}', '{"level":"info","msg":"listening","addr":"0.0.0.0:8080"}'] } }, deployments: [dep("returns-api", "parcelwise/returns-api:1.0.0", { replicas: 2 })], services: [svc("returns-api", { app: "returns-api" }, { targetPort: 80 })], routes: [["/returns", "returns-api"]] }),
+      sop: ["Endpoints exist, so the selector is fine. Now check the <b>ports</b>: <code>kubectl describe svc returns-api</code> (Port, TargetPort, Endpoints).", "Compare with the container: <code>kubectl describe deploy returns-api</code> (Port), or what the app logs when it starts.", "<b>port</b> is what clients call on the Service. <b>targetPort</b> is where the pod actually listens.", "Test inside the cluster with <code>curl returns-api.shop/returns</code>, then through the ingress."],
+      hints: ["kubectl describe svc returns-api: what's the TargetPort? Which port does the app say it listens on (kubectl logs deploy/returns-api)?", "TargetPort is 80, but the container listens on 8080 (its port is named http).", "kubectl edit svc returns-api → targetPort: 8080 (or: http) → curl http://shop.parcelwise.test/returns"],
+      checks: (s) => { const v = s.k8s.services.find((x) => x.metadata.name === "returns-api"), p = v && (v.spec.ports || [])[0], tp = p && (p.targetPort ?? p.port); return [check("The Service still exposes port 80", p && p.port === 80), check("The Service forwards to the port the app listens on (8080 / http)", tp === 8080 || tp === "8080" || tp === "http"), check("http://shop.parcelwise.test/returns returns 200", http200(s, "http://shop.parcelwise.test/returns"))]; },
+      debrief: "A Service has two ports: <b>port</b> (what callers use) and <b>targetPort</b> (where the pod listens). Endpoints only prove that the selector matched some pods, not that anything is listening on that port. Use <b>named ports</b> (<code>targetPort: http</code>) so the Service follows the container if its port ever changes, and run a smoke test against the real URL after every deploy." },
+
+    { id: "PW-308", rank: 2, xp: 150, priority: "Critical", from: "maya", title: "orders-api won't start after node upgrades",
+      message: "The cluster nodes were recycled overnight (routine AMI upgrade) and now every <b>orders-api</b> pod is stuck in CreateContainerConfigError, so nobody can see their orders. Jess rotated the orders database password yesterday afternoon, if that's relevant?",
+      topic: "Secrets",
+      setup: () => k8sHost({
+        apps: { "parcelwise/orders-api": { port: 8080, requiredEnv: ["DB_HOST", "DB_PASSWORD"], routes: { "/orders": { status: 200, body: '{"orders_today":1284}' } } } },
+        deployments: [dep("orders-api", "parcelwise/orders-api:2.4.1", { replicas: 3, env: [{ name: "DB_HOST", value: "orders-db.cluster-c1x.eu-west-2.rds.amazonaws.com" }, { name: "DB_PASSWORD", valueFrom: { secretKeyRef: { name: "orders-db", key: "password" } } }] })],
+        services: [svc("orders-api", { app: "orders-api" })], routes: [["/orders", "orders-api"]],
+        secrets: [{ apiVersion: "v1", kind: "Secret", metadata: { name: "orders-db", namespace: "shop", annotations: { "parcelwise.test/rotated-by": "jess", "parcelwise.test/rotated-at": "2026-11-25T16:40:00Z" } }, type: "Opaque", data: { DB_PASSWORD: btoa("0rd3rs-R0tated!-Nov") } }],
+      }),
+      sop: ["<code>kubectl get pods</code>: <b>CreateContainerConfigError</b> means Kubernetes couldn't build the container's environment, so the app never even started.", "<code>kubectl describe pod …</code>: the Events name the exact problem.", "Compare what the Deployment asks for (<code>kubectl describe deploy orders-api</code>, Environment) with what the Secret holds (<code>kubectl describe secret orders-db</code> shows key names, not values).", "Fix the reference so the names match, keep the password coming from the Secret, and watch the pods come up."],
+      hints: ["Describe one of the orders-api pods and read the Events at the bottom.", "The Deployment wants key 'password' from Secret orders-db, but since the rotation the key is called DB_PASSWORD.", "kubectl edit deploy orders-api → in the DB_PASSWORD entry, change secretKeyRef key: password → key: DB_PASSWORD"],
+      checks: (s) => { const c = container(s, "orders-api"), e = (c.env || []).find((x) => x.name === "DB_PASSWORD"), ref = e && e.valueFrom && e.valueFrom.secretKeyRef, p = podsOf(s, "orders-api")[0]; return [check("DB_PASSWORD still comes from the orders-db Secret", (ref && ref.name === "orders-db" && !(e && e.value)) || (!e && (c.envFrom || []).some((x) => x.secretRef && x.secretRef.name === "orders-db"))), check("All orders-api pods are Running and Ready", allReady(s, "orders-api")), check("The pods get the rotated password", p && p.ev.env && p.ev.env.DB_PASSWORD === "0rd3rs-R0tated!-Nov"), check("http://shop.parcelwise.test/orders returns 200", http200(s, "http://shop.parcelwise.test/orders"))]; },
+      debrief: "Secrets and ConfigMaps are referenced by <b>name and key</b>, and nothing checks they still line up when someone edits one. Running pods keep their old values, so the break only appears when pods are recreated (a deploy, a node upgrade, a crash), often hours later and in the middle of the night. Rotate with a runbook or a tool (such as the External Secrets Operator) that keeps key names stable, and restart the app straight after a rotation so any mistake shows up while you're still watching." },
+
+    { id: "PW-309", rank: 2, xp: 150, priority: "High", from: "maya", title: "Warehouse scanners offline after the move",
+      message: "The platform team moved <b>scanner-gateway</b> into its own <b>warehouse</b> namespace last night. Since then the handheld scanners at the depot can't connect. Sam says <code>kubectl get pods</code> doesn't even show it any more?! 🤔",
+      topic: "Namespaces",
+      setup: () => k8sHost({
+        apps: { "parcelwise/scanner-gateway": { port: 8080, requiredEnv: ["SCANNER_API_URL", "SITE_ID"], logs: ['{"level":"info","msg":"scanner-gateway 2.3.0 ready","site":"LHR-02"}'] } },
+        deployments: [dep("scanner-gateway", "parcelwise/scanner-gateway:2.3.0", { ns: "warehouse", replicas: 2, envFrom: [{ configMapRef: { name: "scanner-config" } }] })],
+        configmaps: [{ apiVersion: "v1", kind: "ConfigMap", metadata: { name: "scanner-config", namespace: "shop" }, data: { SCANNER_API_URL: "https://scanners.parcelwise.internal/api", SITE_ID: "LHR-02", BATCH_SIZE: "50" } }],
+      }),
+      sop: ["<code>kubectl get pods</code> only looks in your current namespace (shop). Add <code>-n warehouse</code>, or <code>-A</code> for every namespace.", "<code>kubectl describe pod -n warehouse …</code>: read the Events.", "ConfigMaps (and Secrets) are <b>namespaced</b>: a pod can only use ones in its own namespace.", "Copy it across: <code>kubectl get cm scanner-config -n shop -o yaml > /tmp/cm.yaml</code>, change <code>namespace:</code> to warehouse, then <code>kubectl apply -f /tmp/cm.yaml</code>. Or <code>kubectl create configmap … -n warehouse --from-literal=KEY=VALUE</code>."],
+      hints: ["kubectl get pods -A: where are the scanner-gateway pods, and what state are they in?", "They're in warehouse with CreateContainerConfigError: configmap \"scanner-config\" not found. It only exists in the shop namespace.", "kubectl get cm scanner-config -n shop -o yaml > /tmp/cm.yaml → nano /tmp/cm.yaml (namespace: warehouse) → kubectl apply -f /tmp/cm.yaml → kubectl get pods -n warehouse"],
+      checks: (s) => {
+        const d = s.k8s.deployments.find((x) => x.metadata.name === "scanner-gateway" && x.metadata.namespace === "warehouse"), c = d && d.spec.template.spec.containers[0];
+        const cm = s.k8s.configmaps.find((x) => x.metadata.name === "scanner-config" && x.metadata.namespace === "warehouse"), ps = podsIn(s, "warehouse", "scanner-gateway");
+        return [check("scanner-gateway still runs in the warehouse namespace", d), check("scanner-config exists in warehouse with the same settings", cm && cm.data && cm.data.SCANNER_API_URL === "https://scanners.parcelwise.internal/api" && cm.data.SITE_ID === "LHR-02"), check("scanner-gateway reads its settings from that ConfigMap", c && JSON.stringify([c.env || [], c.envFrom || []]).includes("scanner-config")), check("All scanner-gateway pods are Running and Ready", ps.length > 0 && ps.every((p) => p.ev.ready) && ps.every((p) => p.hash === ps[0].hash))];
+      },
+      debrief: "Namespaces split one cluster into separate spaces, usually per team or app, so names can repeat and permissions can differ. Almost everything inside them is namespaced, so moving an app means moving its ConfigMaps, Secrets, Services and RBAC too. Keep each app's manifests together (Helm, Kustomize) and deploy them as one unit. And when something seems to have vanished, check <code>-n</code> / <code>-A</code> before you panic." },
+
     // ===================================================== SENIOR SRE
     { id: "PW-401", rank: 3, xp: 180, priority: "High", from: "maya", title: "New status page returns 404",
       message: "We launched status.parcelwise.test this morning but it just shows a plain nginx 404. The pods and service are fine according to Sam. Can you get it live before the newsletter goes out at noon?",
@@ -347,5 +518,50 @@
       hints: ["kubectl top pods: each storefront pod is using ~700m CPU against a 250m request.", "You need about 6+ pods to bring each under 250m, and an HPA so it adapts by itself.", "kubectl autoscale deploy storefront --min=3 --max=10 --cpu-percent=60 && kubectl get hpa"],
       checks: (s) => { const d = depObj(s, "storefront"); const ready = podsOf(s, "storefront").filter((p) => p.ev.ready).length; const hpa = s.k8s.hpas.find((h) => h.spec.scaleTargetRef.name === "storefront"); return [check("storefront has a HorizontalPodAutoscaler", hpa), check("The HPA keeps at least 3 replicas", hpa && hpa.spec.minReplicas >= 3), check("Enough Ready pods to bring CPU per pod under its 250m request", ready >= 6 && 1400 / ready <= 250)]; },
       debrief: "Scale out on a metric, not a hunch. An HPA adds pods when average CPU (relative to <b>requests</b>) crosses the target, so set accurate requests. It also needs nodes to place pods on: pair it with Cluster Autoscaler or Karpenter, and load-test before the next big campaign." },
+    { id: "PW-404", rank: 3, xp: 200, priority: "Critical", from: "tom", title: "Rolled back, still broken",
+      message: "🚨 Payments are failing AGAIN. Sam's hotfix <b>4.0.1</b> went out at 14:10 and made it worse, so he ran <code>kubectl rollout undo</code>… and it's STILL failing. He's now on a train with no signal 🚆 Please get payments working!",
+      topic: "Rollbacks",
+      setup: () => {
+        const tpl = (v) => dep("payments-api", `parcelwise/payments-api:${v}`, { replicas: 3 }).spec.template;
+        const bad = (v, err) => ({ port: 8080, routes: { "/pay": { status: 500, body: `{"error":"${err}"}` } }, logs: [`{"level":"info","msg":"payments-api ${v} listening"}`, `{"level":"error","msg":"POST /pay 500","err":"${err}"}`, `{"level":"error","msg":"POST /pay 500","err":"${err}"}`] });
+        return k8sHost({
+          apps: { "parcelwise/payments-api:4.0.0": bad("4.0.0", "TypeError: Cannot read properties of undefined (reading 'currency')"), "parcelwise/payments-api:4.0.1": bad("4.0.1", "RangeError: Invalid currency code : undefined"), "parcelwise/payments-api": { port: 8080, routes: { "/pay": { status: 200, body: '{"ok":true,"payment":"PAY-1182"}' } } } },
+          // revisions: 1 = 3.9.2 (good), 2 = 4.0.0, 3 = 4.0.1, and Sam's undo made 4.0.0 current again
+          deployments: [Object.assign(dep("payments-api", "parcelwise/payments-api:4.0.0", { replicas: 3 }), { _history: [tpl("3.9.2"), tpl("4.0.0"), tpl("4.0.1")] })],
+          services: [svc("payments-api", { app: "payments-api" })], routes: [["/pay", "payments-api"]],
+        });
+      },
+      sop: ["Restore service first, investigate later. <code>kubectl rollout history deploy/payments-api</code> lists every revision and its image.", "<code>rollout undo</code> goes back <b>one</b> revision, which here is just the other broken release.", "Find the last revision that worked (before 4.0.x) and go straight to it: <code>kubectl rollout undo deploy/payments-api --to-revision=N</code>.", "Verify: <code>kubectl rollout status deploy/payments-api</code> and <code>curl http://shop.parcelwise.test/pay</code>."],
+      hints: ["kubectl rollout history deploy/payments-api. Which revision ran 3.9.2?", "A plain 'rollout undo' flips between 4.0.0 and 4.0.1, and both are broken. Revision 1 is 3.9.2.", "kubectl rollout undo deploy/payments-api --to-revision=1 && curl http://shop.parcelwise.test/pay"],
+      checks: (s) => [check("payments-api runs 3.9.2, the last good version", container(s, "payments-api").image === "parcelwise/payments-api:3.9.2"), check("All payments-api pods are Ready", allReady(s, "payments-api")), check("http://shop.parcelwise.test/pay returns 200", http200(s, "http://shop.parcelwise.test/pay"))],
+      debrief: "Under pressure people repeat whatever worked last time. <code>rollout undo</code> means 'the previous revision', not 'the last good version', and after a hotfix and an undo those are very different things. Read the history, pick the known-good revision, and record a change-cause on each deploy (the <code>kubernetes.io/change-cause</code> annotation, or your CD tool) so the history makes sense at 2am. Progressive delivery tools such as Argo Rollouts can roll back automatically when the error rate climbs." },
+
+    { id: "PW-405", rank: 3, xp: 200, priority: "High", from: "maya", title: "The autoscaler never scales",
+      message: "Search has been sluggish since the new 'gift finder' launched. We added an autoscaler to <b>search-api</b> after Black Friday, but it's sat at 2 pods all week. Can you find out why it isn't scaling, and fix it?",
+      topic: "Autoscaling",
+      setup: () => k8sHost({
+        apps: { "parcelwise/search-api": { port: 8080, health: "/healthz", cpuLoad: 900, memMi: 210, routes: { "/search": { status: 200, body: '{"results":24,"took_ms":2140}' } }, logs: ['{"level":"info","msg":"search index loaded","docs":182331}', '{"level":"warn","msg":"slow query","took_ms":2140,"q":"gift for dad"}'] } },
+        deployments: [dep("search-api", "parcelwise/search-api:1.2.0", { replicas: 2, resources: { requests: { memory: "256Mi" }, limits: { memory: "512Mi" } } })],
+        services: [svc("search-api", { app: "search-api" })], routes: [["/search", "search-api"]],
+        hpas: [{ _age: "9d", apiVersion: "autoscaling/v2", kind: "HorizontalPodAutoscaler", metadata: { name: "search-api", namespace: "shop" }, spec: { scaleTargetRef: { apiVersion: "apps/v1", kind: "Deployment", name: "search-api" }, minReplicas: 2, maxReplicas: 10, metrics: [{ type: "Resource", resource: { name: "cpu", target: { type: "Utilization", averageUtilization: 60 } } }] } }],
+      }),
+      sop: ["<code>kubectl get hpa</code>: what does the TARGETS column say?", "<code>kubectl describe hpa search-api</code>: the Conditions and Events say why it can't act.", "An HPA's CPU target is a percentage of each pod's <b>CPU request</b>. No request means no percentage, which means no scaling.", "Add a request (<code>kubectl edit deploy search-api</code>, <code>resources.requests.cpu</code>) sized from <code>kubectl top pods</code>, then watch <code>kubectl get hpa</code>."],
+      hints: ["kubectl get hpa shows cpu: <unknown>/60%. Why can't it measure?", "describe hpa: 'missing request for cpu'. The container only requests memory.", "kubectl edit deploy search-api → under resources.requests add cpu: 250m → kubectl get hpa && kubectl top pods"],
+      checks: (s) => { const c = container(s, "search-api"), req = cpuM(((c.resources || {}).requests || {}).cpu), hpa = s.k8s.hpas.find((h) => h.spec.scaleTargetRef.name === "search-api"), ready = podsOf(s, "search-api").filter((p) => p.ev.ready).length; return [check("search-api has a CPU request, so the HPA can measure it", req > 0), check("…a realistic one (between 50m and 1 CPU)", req >= 50 && req <= 1000), check("The autoscaler is still in charge", hpa && hpa.spec.maxReplicas >= 4), check("Enough Ready pods to bring CPU per pod under its request", ready > 0 && 900 / ready <= req)]; },
+      debrief: "Autoscaling maths runs on requests: utilisation = usage ÷ request. Without a CPU request the HPA shows <code>&lt;unknown&gt;</code> and quietly does nothing, which is why 'the autoscaler never scales' is such a classic. Set requests from real usage on every container (a LimitRange can set defaults, and policy tools such as Kyverno can reject Deployments without them), and alert when an HPA sits at its minimum or maximum for too long." },
+
+    { id: "PW-406", rank: 3, xp: 180, priority: "Normal", from: "lena", title: "Why is the AWS bill up £3,800?",
+      message: "Hi! Our AWS bill is up <b>£3,800</b> this month and Cost Explorer blames the Kubernetes nodes 💸 Nobody on the platform team knows why. Sam mentioned a load test 'a few weeks ago'? Please stop whatever is wasting money, but obviously don't touch the live shop!",
+      topic: "Cost",
+      setup: () => k8sHost({
+        apps: { "grafana/k6": { port: 6565, cpuLoad: 28500, memMi: 900, logs: ["running (412h31m02.1s), 30/30 VUs, 18310442 complete and 0 interrupted iterations", "default   [ 100% ] 30 VUs  412h31m02.1s/∞", "     ✓ status is 200"] } },
+        deployments: [Object.assign(dep("load-generator", "grafana/k6:0.54.0", { ns: "loadtest", replicas: 30, port: 6565, resources: { requests: { cpu: "1", memory: "1Gi" }, limits: { memory: "2Gi" } } }), { _age: "17d" })],
+        hpas: [{ _age: "17d", apiVersion: "autoscaling/v2", kind: "HorizontalPodAutoscaler", metadata: { name: "load-generator", namespace: "loadtest" }, spec: { scaleTargetRef: { apiVersion: "apps/v1", kind: "Deployment", name: "load-generator" }, minReplicas: 30, maxReplicas: 30, metrics: [{ type: "Resource", resource: { name: "cpu", target: { type: "Utilization", averageUtilization: 80 } } }] } }],
+      }),
+      sop: ["Find it: <code>kubectl get pods -A</code> (every namespace) and <code>kubectl top pods -A</code>.", "Check before you delete: what is it, and does anything in prod depend on it? <code>kubectl get all -n loadtest</code>, <code>kubectl get hpa -A</code>.", "Watch out for an <b>HPA</b>: it will scale a Deployment straight back up to its minimum after a manual <code>kubectl scale</code>.", "Stop it: <code>kubectl delete namespace loadtest</code> removes everything inside, or delete the HPA and the Deployment one by one."],
+      hints: ["kubectl get pods -A: which namespace has dozens of pods?", "loadtest/load-generator: 30 k6 pods, each requesting a whole CPU, running for weeks. An HPA holds it at 30.", "kubectl delete namespace loadtest   (or: kubectl delete hpa load-generator -n loadtest && kubectl delete deploy load-generator -n loadtest)"],
+      checks: (s) => [check("No load-generator pods are running", podsIn(s, null, "load-generator").length === 0), check("storefront is untouched (all pods Ready)", allReady(s, "storefront") && podsOf(s, "storefront").length >= 2), check("tracking-api is untouched", allReady(s, "tracking-api")), check("The shop still loads", http200(s, "http://shop.parcelwise.test/"))],
+      debrief: "Cost is an SRE problem too. Forgotten test workloads are one of the most common sources of cloud waste: here, 30 CPUs kept extra nodes running for weeks. Give every workload an owner label and an expiry date, run load tests as Jobs that finish on their own (k6 with a duration, not forever), and set AWS Budgets alerts so a spike reaches someone within days, not at month-end. With Cluster Autoscaler or Karpenter, the spare nodes disappear once the pods do." },
+
   ];
 })();

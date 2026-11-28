@@ -38,7 +38,6 @@
   const ticketsOfRank = (r) => T.filter((t) => t.rank === r);
   const rankDone = (r) => ticketsOfRank(r).every((t) => P.done[t.id]);
   const rank = () => { let r = 0; while (r < OD.RANKS.length - 1 && rankDone(r)) r++; return r; };
-  const unlocked = (t) => t.rank <= rank();
   const xpFor = (t) => t.xp;
 
   // worlds live in memory for this visit; "Reset" rebuilds a ticket's world
@@ -98,7 +97,7 @@ $ curl -s localhost/health
   let pane = "ticket"; // mobile tab
   function desk() {
     document.body.className = "desk";
-    const r = rank(), cur = ticket(P.current) && unlocked(ticket(P.current)) ? ticket(P.current) : T.find((t) => unlocked(t) && !P.done[t.id]) || T[0];
+    const r = rank(), cur = ticket(P.current) || T.find((t) => !P.done[t.id]) || T[0];
     P.current = cur.id; save();
     const nextNeed = ticketsOfRank(r).filter((t) => !P.done[t.id]).length;
     const total = T.reduce((a, t) => a + t.xp, 0);
@@ -112,8 +111,8 @@ $ curl -s localhost/health
       <div class="grid" data-pane="${pane}">
         <aside class="queue">
           <h2>Inbox</h2>
-          ${OD.RANKS.map((rk, i) => `<div class="grp ${i > r ? "locked" : ""}"><h4>${i > r ? "🔒 " : ""}${rk.title}</h4>${ticketsOfRank(i).map((t) => `<button class="tk ${t.id === cur.id ? "on" : ""} ${P.done[t.id] ? "done" : ""}" data-id="${t.id}" ${i > r ? "disabled" : ""}><span class="tk-id">${t.id}</span><span class="tk-t">${esc(t.title)}</span><span class="tk-m">${P.done[t.id] ? `✓ ${P.done[t.id].xp} XP` : `${person(t.from).avatar} ${t.topic}`}</span></button>`).join("")}</div>`).join("")}
-          ${r < OD.RANKS.length - 1 ? `<p class="promo">Resolve ${nextNeed} more ticket${nextNeed === 1 ? "" : "s"} to be promoted to <b>${OD.RANKS[r + 1].title}</b>.</p>` : ""}
+          ${OD.RANKS.map((rk, i) => `<div class="grp"><h4>${rk.title}</h4>${ticketsOfRank(i).map((t) => `<button class="tk ${t.id === cur.id ? "on" : ""} ${P.done[t.id] ? "done" : ""}" data-id="${t.id}"><span class="tk-id">${t.id}</span><span class="tk-t">${esc(t.title)}</span><span class="tk-m">${P.done[t.id] ? `✓ ${P.done[t.id].xp} XP` : `${person(t.from).avatar} ${t.topic}`}</span></button>`).join("")}</div>`).join("")}
+          ${r < OD.RANKS.length - 1 ? `<p class="promo">Every ticket is open. Resolve ${nextNeed} more ${OD.RANKS[r].title} ticket${nextNeed === 1 ? "" : "s"} to be promoted to <b>${OD.RANKS[r + 1].title}</b>.</p>` : ""}
         </aside>
         <main class="work">
           <article class="ticket">
@@ -241,7 +240,7 @@ $ curl -s localhost/health
     if (first) { P.done[t.id] = { xp: xpFor(t), at: Date.now() }; save(); }
     const after = rank();
     const m = $("#modal"); m.hidden = false;
-    const next = T.find((x) => unlocked(x) && !P.done[x.id]);
+    const next = T.find((x) => !P.done[x.id]);
     m.innerHTML = `<div class="sheet win" role="dialog" aria-modal="true">
       ${after > before ? `<div class="promo-big">🎉 Promoted to <b>${OD.RANKS[after].title}</b>!<br><small>${OD.RANKS[after].blurb}</small></div>` : ""}
       <h2>✓ ${t.id} resolved${first ? ` · +${P.done[t.id].xp} XP` : ""}</h2>

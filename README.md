@@ -8,10 +8,12 @@ Everything runs in the browser. There are no real servers, no accounts and no bu
 
 | Rank | Area | Tickets |
 |---|---|---|
-| DevOps Intern | Linux: disk full, broken nginx config, users & groups, cron/permissions, runaway process | 5 |
-| Junior DevOps Engineer | Docker: missing env vars, wrong port mapping, multi-stage non-root Dockerfile, image cleanup | 4 |
-| Platform Engineer | Kubernetes: ImagePullBackOff, Service selector, CrashLoopBackOff/ConfigMap, OOMKilled, rollback, readiness probe | 6 |
-| Senior SRE | Ingress class, moving a password into a Secret, HPA for a traffic spike | 3 |
+| DevOps Intern | Linux: disk full, broken nginx config, users & groups, cron/permissions, runaway process, service not enabled after a reboot, cron schedule mistake, SSH key permissions | 8 |
+| Junior DevOps Engineer | Docker: missing env vars, wrong port mapping, multi-stage non-root Dockerfile, image cleanup, database without a volume, AWS key baked into an image, in-place version upgrade | 7 |
+| Platform Engineer | Kubernetes: ImagePullBackOff, Service selector, CrashLoopBackOff/ConfigMap, OOMKilled, rollback, readiness probe, Service targetPort, Secret key renamed in a rotation, ConfigMap missing from a new namespace | 9 |
+| Senior SRE | Ingress class, moving a password into a Secret, HPA for a traffic spike, rollback to a specific revision, HPA that can't scale without CPU requests, a forgotten load test running up the AWS bill | 6 |
+
+Every ticket is open from the start, so you can jump to whatever you want to practise. Your rank goes up as you clear each rank's tickets.
 
 Each ticket has a briefing (what's being asked, background, and the concepts and commands you need), a runbook, three free hints (nudge, closer, full answer), and a debrief explaining what a senior engineer would want you to take away.
 
@@ -41,7 +43,7 @@ To host it on GitHub Pages: Settings → Pages → *Deploy from a branch* → `m
 
 ```bash
 node test/engine.test.js      # every ticket starts broken and its reference solution passes the grader
-node test/ui.test.js          # plays all 18 tickets through the real UI (needs Playwright + Chromium)
+node test/ui.test.js          # plays all 30 tickets through the real UI (needs Playwright + Chromium)
 node test/wrong.test.js       # tempting-but-wrong fixes are rejected
 node test/sync.test.js        # two browsers sync progress both ways (serve the folder on :8765 first)
 node test/security.test.js    # hostile input can't run script, sync links need consent, CSP and frame protection hold
