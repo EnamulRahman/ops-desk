@@ -8,14 +8,31 @@ Everything runs in the browser. There are no real servers, no accounts and no bu
 
 | Rank | Area | Tickets |
 |---|---|---|
-| DevOps Intern | Linux: disk full, broken nginx config, users & groups, cron/permissions, runaway process, service not enabled after a reboot, cron schedule mistake, SSH key permissions | 8 |
-| Junior DevOps Engineer | Docker: missing env vars, wrong port mapping, multi-stage non-root Dockerfile, image cleanup, database without a volume, AWS key baked into an image, in-place version upgrade | 7 |
-| Platform Engineer | Kubernetes: ImagePullBackOff, Service selector, CrashLoopBackOff/ConfigMap, OOMKilled, rollback, readiness probe, Service targetPort, Secret key renamed in a rotation, ConfigMap missing from a new namespace | 9 |
-| Senior SRE | Ingress class, moving a password into a Secret, HPA for a traffic spike, rollback to a specific revision, HPA that can't scale without CPU requests, a forgotten load test running up the AWS bill | 6 |
+| DevOps Intern | Linux: disk full, broken nginx config, users & groups, cron/permissions, runaway process, service not enabled after a reboot, cron schedule mistake, SSH key permissions, expired TLS certificate, finding a scraper in the access log, a held security patch | 11 |
+| Junior DevOps Engineer | Docker: missing env vars, wrong port mapping, multi-stage non-root Dockerfile, image cleanup, database without a volume, AWS key baked into an image, in-place version upgrade, Trivy CVEs in a base image, container logs filling the disk | 9 |
+| Platform Engineer | Kubernetes: ImagePullBackOff, Service selector, CrashLoopBackOff/ConfigMap, OOMKilled, rollback, readiness probe, Service targetPort, Secret key renamed in a rotation, ConfigMap missing from a new namespace, Helm release stuck pending, node drain blocked by a PodDisruptionBudget | 11 |
+| Senior SRE | Ingress class, moving a password into a Secret, HPA for a traffic spike, rollback to a specific revision, HPA that can't scale without CPU requests, a forgotten load test running up the AWS bill, backups that can't be restored, deploys burning the error budget | 8 |
 
 Every ticket is open from the start, so you can jump to whatever you want to practise. Your rank goes up as you clear each rank's tickets.
 
 Each ticket has a briefing (what's being asked, background, and the concepts and commands you need), a runbook, three free hints (nudge, closer, full answer), and a debrief explaining what a senior engineer would want you to take away.
+
+### Where the scenarios come from
+
+The later tickets are based on what UK employers ask DevOps, platform and SRE engineers to do. They were drawn from current job descriptions at junior to staff level (government digital teams, consultancies, fintech, logistics, energy and consumer tech):
+
+| What the job descriptions ask for | Tickets |
+|---|---|
+| Linux troubleshooting, Bash, log analysis | PW-106, PW-107, PW-110 |
+| OS patching and vulnerability remediation | PW-111, PW-208 |
+| Certificate management | PW-109 |
+| Container security scanning (Trivy, Snyk), secrets handling | PW-206, PW-208 |
+| Production capacity and disk | PW-209 |
+| Kubernetes and Helm deployments | PW-307 to PW-310 |
+| Patching Kubernetes nodes, high availability | PW-311 |
+| PostgreSQL backups and restore drills, ISO 27001 evidence | PW-407 |
+| Incident management, SLOs and error budgets, zero downtime | PW-404, PW-408 |
+| Autoscaling and cost optimisation (FinOps) | PW-405, PW-406 |
 
 ## Playing on more than one device
 
@@ -23,9 +40,9 @@ Progress is saved in your browser. To carry it to another device, press **☁️
 
 ## What's simulated
 
-- **Linux shell:** pipes, `&&`/`||`/`;`, redirects, globs, `sudo`, file permissions, users/groups, systemd services and journal, processes and signals, `df`/`du`/`lsof`, `curl`, and a nano/vim-style editor.
-- **Docker:** images, containers, `run` flags (`-p`, `-e`, `--env-file`, `--restart`), logs, `build` with a Dockerfile analyser (multi-stage, base image size, `USER`), prune and `system df`.
-- **Kubernetes:** Deployments → pods (ImagePullBackOff, CrashLoopBackOff, OOMKilled, probe failures), rolling updates and revision history, Services/Endpoints by label, Ingress routing by host and class, ConfigMaps, Secrets, HPA, `kubectl get/describe/logs/edit/apply/set/rollout/top/autoscale`.
+- **Linux shell:** pipes, `&&`/`||`/`;`, redirects, globs, `sudo`, file permissions, users/groups, systemd services and journal, processes and signals, `df`/`du`/`lsof`, `curl`, `awk`/`cut`/`sort`/`uniq` for log analysis, `apt` (holds, needrestart), `openssl`/`certbot` and systemd timers, a little of the `aws` CLI, and a nano/vim-style editor.
+- **Docker:** images, containers, `run` flags (`-p`, `-e`, `--env-file`, `--restart`), logs, `build` with a Dockerfile analyser (multi-stage, base image size, `USER`), prune and `system df`, volumes, `history`, log rotation (`--log-opt`, `daemon.json`), and `trivy image` scanning.
+- **Kubernetes:** Deployments → pods (ImagePullBackOff, CrashLoopBackOff, OOMKilled, probe failures), rolling updates and revision history, Services/Endpoints by label, Ingress routing by host and class, ConfigMaps, Secrets, HPA, PodDisruptionBudgets, namespaces, node cordon/drain, rolling-update strategy, `kubectl get/describe/logs/edit/apply/set/rollout/top/autoscale/drain`, and `helm` (list, history, upgrade, rollback, with releases stored as Secrets like Helm 3).
 
 Type `help` in the terminal, or open the 📒 Binder, for the command reference.
 
@@ -43,7 +60,7 @@ To host it on GitHub Pages: Settings → Pages → *Deploy from a branch* → `m
 
 ```bash
 node test/engine.test.js      # every ticket starts broken and its reference solution passes the grader
-node test/ui.test.js          # plays all 30 tickets through the real UI (needs Playwright + Chromium)
+node test/ui.test.js          # plays all 39 tickets through the real UI (needs Playwright + Chromium)
 node test/wrong.test.js       # tempting-but-wrong fixes are rejected
 node test/sync.test.js        # two browsers sync progress both ways (serve the folder on :8765 first)
 node test/security.test.js    # hostile input can't run script, sync links need consent, CSP and frame protection hold

@@ -9,14 +9,37 @@
     "python:3.12": 1020, "python:3.12-slim": 155, "python:3.12-alpine": 58, "golang:1.25": 880, "golang:1.25-alpine": 260,
     "alpine:3.21": 8, "alpine": 8, "nginx:1.27": 190, "nginx:1.27-alpine": 52, "nginx:alpine": 52, "ubuntu:24.04": 78,
     "gcr.io/distroless/nodejs22-debian12": 130, "gcr.io/distroless/static-debian12": 2, "nginxinc/nginx-unprivileged:stable-alpine": 54,
+    "nginxinc/nginx-unprivileged:1.27.3-alpine": 54, "nginxinc/nginx-unprivileged:1.27.5-alpine": 53,
   };
 
+  // Vulnerability data for `trivy image`, by base image. Fictional CVE ids: this is a training game.
+  OD.VULNS = {
+    "nginxinc/nginx-unprivileged:1.27.3-alpine": { os: "alpine 3.20.3", vulns: [
+      ["libcrypto3", "CVE-2026-41207", "CRITICAL", "3.3.2-r0", "3.3.3-r1", "openssl: remote code execution in X.509 name constraint checking"],
+      ["libssl3", "CVE-2026-41207", "CRITICAL", "3.3.2-r0", "3.3.3-r1", "openssl: remote code execution in X.509 name constraint checking"],
+      ["libxml2", "CVE-2026-38810", "HIGH", "2.12.7-r0", "2.12.9-r0", "libxml2: use-after-free when parsing crafted XML"],
+      ["busybox", "CVE-2026-30115", "MEDIUM", "1.36.1-r29", "1.36.1-r31", "busybox: out-of-bounds read in awk"],
+    ] },
+    "nginxinc/nginx-unprivileged:1.27.5-alpine": { os: "alpine 3.21.3", vulns: [] },
+  };
+  OD.imageVulns = (i) => { const v = OD.VULNS[i.base]; return { os: v ? v.os : "debian 12.8", vulns: v && !i.patched ? v.vulns : [] }; };
+  const logDir = (c) => `/var/lib/docker/containers/${c.id}e1f0c9d2a7b4`;
+  const logPath = (c) => `${logDir(c)}/${c.id}e1f0c9d2a7b4-json.log`;
+  const parseSize = (v) => { const m = String(v || "").match(/^(\d+)([kmg]?)$/i); return m ? +m[1] * { "": 1, k: OD.KB, m: OD.MB, g: OD.GB }[m[2].toLowerCase()] : 0; };
+  function writeLog(s, c, size) { if (!s.docker.logFiles) return; const lo = c.logOpts || {}, cap = parseSize(lo["max-size"]); s.fs.write(logPath(c), '{"log":"…","stream":"stdout"}\n', { owner: "root", mode: "640", size: Math.round(cap ? Math.min(size, cap) : size) }, true); }
   OD.addDocker = (s, d) => {
     s.docker = { images: [], containers: [], apps: {}, volumes: [], ...d };
     s.docker.images.forEach((i) => { i.id = i.id || OD.hash(i.repo + i.tag).padEnd(12, "0").slice(0, 12); i.size = i.size * OD.MB; });
-    s.docker.containers.forEach((c) => { c.id = c.id || OD.hash(c.name).padEnd(12, "a").slice(0, 12); evalContainer(s, c); });
+    s.docker.containers.forEach((c) => { c.id = c.id || OD.hash(c.name).padEnd(12, "a").slice(0, 12); evalContainer(s, c); writeLog(s, c, c.logSize || 4 * OD.MB); });
     if (!s.groups.docker) s.groups.docker = ["ops"];
   };
+  OD.dockerService = () => ({
+    desc: "Docker Application Container Engine", port: 0, proc: { cmd: "/usr/bin/dockerd -H fd:// --containerd=/run/containerd/containerd.sock", user: "root", cpu: 1.1, mem: 2.3 },
+    holds: (s) => (s.docker ? s.docker.containers.map(logPath) : []),
+    check: (s) => { const f = s.fs.get("/etc/docker/daemon.json"); if (!f || !f.content.trim()) return { ok: true }; try { const j = JSON.parse(f.content); if (typeof j !== "object" || Array.isArray(j)) throw new Error("not an object"); return { ok: true }; } catch (e) { return { ok: false, journal: [`dockerd[2210]: unable to configure the Docker daemon with file /etc/docker/daemon.json: invalid character in JSON (${String(e.message).split("\n")[0]})`, "systemd[1]: docker.service: Main process exited, code=exited, status=1/FAILURE"] }; } },
+    onStart: (s) => { const f = s.fs.get("/etc/docker/daemon.json"); let j = {}; try { j = f && f.content.trim() ? JSON.parse(f.content) : {}; } catch { j = {}; } s.docker.daemonLogOpts = j["log-opts"] || {}; s.docker.containers.forEach((c) => { if (c.wasRunning && /always|unless-stopped/.test(c.restart || "")) { c.status = "running"; evalContainer(s, c); } delete c.wasRunning; }); },
+    onStop: (s) => { s.docker.containers.forEach((c) => { if (c.status === "running") { c.wasRunning = true; c.status = "exited"; c.exitCode = 0; c.ago = "Less than a second ago"; } }); },
+  });
   const app = (s, image) => s.docker.apps[image] || s.docker.apps[image.split(":")[0]] || {};
   const findC = (s, ref) => s.docker.containers.find((c) => c.name === ref || c.id.startsWith(ref));
   const imgRef = (i) => `${i.repo}:${i.tag}`;
@@ -41,6 +64,7 @@
   C.docker = (ctx) => {
     const s = ctx.state; if (!s.docker) return { out: "docker: command not found", code: 127 };
     const deny = needDocker(ctx); if (deny) return deny;
+    if (s.services.docker && !s.services.docker.active) return { out: "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?", code: 1 };
     let [sub, ...rest] = ctx.args;
     if (sub === "container") sub = rest.shift();
     else if (sub === "image") { const v = rest.shift(); sub = { prune: "image-prune", ls: "images", rm: "rmi" }[v] || v; }
@@ -61,7 +85,7 @@
   D.logs = (s, args) => { const { pos } = parseArgs(args, ["n", "tail"]); const c = findC(s, pos[0]); if (!c) return { out: `Error response from daemon: No such container: ${pos[0]}`, code: 1 }; return (c.logs || []).join("\n"); };
   D.inspect = (s, args) => {
     const { pos } = parseArgs(args, ["f", "format"]); const c = findC(s, pos[0]);
-    if (c) return JSON.stringify([{ Id: c.id + "e1f0c9…", Name: "/" + c.name, State: { Status: c.status, Running: c.status === "running", ExitCode: c.exitCode }, Mounts: (c.volumes || []).map((v) => (v.source.startsWith("/") ? { Type: "bind", Source: v.source, Destination: v.target } : { Type: "volume", Name: v.source, Source: `/var/lib/docker/volumes/${v.source}/_data`, Destination: v.target })), Config: { Image: c.image, User: app(s, c.image).user || "", Env: Object.entries(c.env || {}).map(([k, v]) => `${k}=${v}`), ExposedPorts: { [`${app(s, c.image).port || 80}/tcp`]: {} } }, HostConfig: { PortBindings: Object.fromEntries((c.ports || []).map((p) => [`${p.container}/tcp`, [{ HostIp: "", HostPort: String(p.host) }]])), RestartPolicy: { Name: c.restart || "no" } } }], null, 2);
+    if (c) return JSON.stringify([{ Id: c.id + "e1f0c9…", Name: "/" + c.name, State: { Status: c.status, Running: c.status === "running", ExitCode: c.exitCode }, Mounts: (c.volumes || []).map((v) => (v.source.startsWith("/") ? { Type: "bind", Source: v.source, Destination: v.target } : { Type: "volume", Name: v.source, Source: `/var/lib/docker/volumes/${v.source}/_data`, Destination: v.target })), Config: { Image: c.image, User: app(s, c.image).user || "", Env: Object.entries(c.env || {}).map(([k, v]) => `${k}=${v}`), ExposedPorts: { [`${app(s, c.image).port || 80}/tcp`]: {} } }, HostConfig: { PortBindings: Object.fromEntries((c.ports || []).map((p) => [`${p.container}/tcp`, [{ HostIp: "", HostPort: String(p.host) }]])), RestartPolicy: { Name: c.restart || "no" }, LogConfig: { Type: "json-file", Config: c.logOpts || {} } }, LogPath: s.docker.logFiles ? logPath(c) : undefined }], null, 2);
     const i = findImg(s, pos[0]);
     if (i) return JSON.stringify([{ Id: "sha256:" + i.id, RepoTags: [imgRef(i)], Size: i.size, Config: { User: i.user || "", Env: Object.entries(i.env || {}).map(([k, v]) => `${k}=${v}`), ExposedPorts: { [`${app(s, imgRef(i)).port || 80}/tcp`]: {} }, ...(i.volumes ? { Volumes: Object.fromEntries(i.volumes.map((v) => [v, {}])) } : {}) } }], null, 2);
     return { out: `Error: No such object: ${pos[0]}`, code: 1 };
@@ -71,18 +95,20 @@
   D.restart = (s, args) => args.map((r) => { const c = findC(s, r); if (!c) return `Error response from daemon: No such container: ${r}`; c.manualStop = false; c.status = "running"; evalContainer(s, c); return r; }).join("\n");
   D.rm = (s, args) => {
     const { flags, pos } = parseArgs(args); const out = [];
-    for (const r of pos) { const c = findC(s, r); if (!c) { out.push(`Error response from daemon: No such container: ${r}`); continue; } if (c.status === "running" && !flags.f) { out.push(`Error response from daemon: cannot remove container "/${c.name}": container is running: stop the container before removing or force remove`); continue; } s.docker.containers = s.docker.containers.filter((x) => x !== c); out.push(r); }
+    for (const r of pos) { const c = findC(s, r); if (!c) { out.push(`Error response from daemon: No such container: ${r}`); continue; } if (c.status === "running" && !flags.f) { out.push(`Error response from daemon: cannot remove container "/${c.name}": container is running: stop the container before removing or force remove`); continue; } s.docker.containers = s.docker.containers.filter((x) => x !== c); s.fs.rm(logDir(c)); s.openDeleted = s.openDeleted.filter((x) => !x.path.startsWith(logDir(c))); out.push(r); }
     return out.join("\n");
   };
   D.run = (s, args) => {
-    const { flags, pos } = parseArgs(args, ["name", "p", "e", "env", "restart", "v", "env-file", "u", "user", "network"]);
+    const { flags, pos } = parseArgs(args, ["name", "p", "publish", "e", "env", "restart", "v", "volume", "env-file", "u", "user", "network", "log-opt", "log-driver", "memory", "m", "cpus", "workdir", "w", "entrypoint", "hostname", "label", "l", "mount"]);
     // collect repeated -p / -e flags manually
-    const ports = [], env = {}, volumes = [];
+    const ports = [], env = {}, volumes = [], logOpts = {};
     for (let i = 0; i < args.length; i++) {
       if (args[i] === "-p" || args[i] === "--publish") { const [h, c] = String(args[i + 1]).split(":"); ports.push({ host: +h, container: +(c || h) }); i++; }
       else if (/^-p\d/.test(args[i])) { const [h, c] = args[i].slice(2).split(":"); ports.push({ host: +h, container: +(c || h) }); }
       else if (args[i] === "-e" || args[i] === "--env") { const [k, ...v] = String(args[i + 1]).split("="); env[k] = v.join("="); i++; }
       else if (args[i].startsWith("--env=")) { const [k, ...v] = args[i].slice(6).split("="); env[k] = v.join("="); }
+      else if (args[i] === "--log-opt") { const [k, ...v] = String(args[i + 1]).split("="); logOpts[k] = v.join("="); i++; }
+      else if (args[i].startsWith("--log-opt=")) { const [k, ...v] = args[i].slice(10).split("="); logOpts[k] = v.join("="); }
       else if (args[i] === "-v" || args[i] === "--volume") { const [src, dst] = String(args[i + 1]).split(":"); if (src && dst) volumes.push({ source: src, target: dst }); i++; }
     }
     if (flags["env-file"]) { const f = s.fs.get(s.fs.norm(s.cwd, flags["env-file"])); if (!f) return { out: `docker: open ${flags["env-file"]}: no such file or directory.`, code: 125 }; f.content.split("\n").forEach((l) => { const m = l.match(/^\s*([A-Z0-9_]+)=(.*)$/); if (m) env[m[1]] = m[2]; }); }
@@ -93,8 +119,8 @@
     if (findC(s, name)) return { out: `docker: Error response from daemon: Conflict. The container name "/${name}" is already in use by container "${findC(s, name).id}". You have to remove (or rename) that container to be able to reuse that name.`, code: 125 };
     for (const p of ports) { const clash = s.docker.containers.find((c) => c.status === "running" && (c.ports || []).some((x) => x.host === p.host)); if (clash) return { out: `docker: Error response from daemon: driver failed programming external connectivity on endpoint ${name}: Bind for 0.0.0.0:${p.host} failed: port is already allocated.`, code: 125 }; }
     for (const v of volumes) if (!v.source.startsWith("/") && !s.docker.volumes.includes(v.source)) s.docker.volumes.push(v.source);
-    const c = { id: OD.hash(name + s.tick).padEnd(12, "c").slice(0, 12), name, image: imgRef(img), ports, env: { ...(img.env || {}), ...env }, volumes, restart: flags.restart, created: "Less than a second ago", up: "Less than a second", status: "running" };
-    s.docker.containers.push(c); evalContainer(s, c);
+    const c = { id: OD.hash(name + s.tick).padEnd(12, "c").slice(0, 12), name, image: imgRef(img), ports, env: { ...(img.env || {}), ...env }, volumes, logOpts: { ...(s.docker.daemonLogOpts || {}), ...logOpts }, restart: flags.restart, created: "Less than a second ago", up: "Less than a second", status: "running" };
+    s.docker.containers.push(c); evalContainer(s, c); writeLog(s, c, 12 * OD.KB);
     if (flags.rm && c.status !== "running") s.docker.containers = s.docker.containers.filter((x) => x !== c);
     return flags.d || flags.detach ? c.id + "e1f0c9d2a7b4" : (c.logs || []).join("\n");
   };
@@ -158,7 +184,7 @@
         const prev = stages.find((st) => st.name === m[1]);
         const base = prev ? null : BASES[m[1]] ?? BASES[m[1] + ":latest"];
         if (!prev && base === undefined) return { out: `ERROR: failed to solve: ${m[1]}: failed to resolve source metadata for docker.io/library/${m[1]}: docker.io/library/${m[1]}: not found`, code: 1 };
-        stages.push({ name: m[2], base: m[1], size: prev ? prev.size : base, user: prev ? prev.user : "root", env: prev ? { ...prev.env } : {}, lines: [] });
+        stages.push({ name: m[2], base: prev ? prev.base : m[1], size: prev ? prev.size : base, user: prev ? prev.user : "root", env: prev ? { ...prev.env } : {}, lines: [], patched: prev ? prev.patched : false });
       } else if (!stages.length) return { out: "ERROR: failed to solve: no build stage in current context", code: 1 };
       else {
         const st = stages[stages.length - 1];
@@ -166,6 +192,7 @@
         if (I === "ENV") { const kv = rest.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:=|\s+)(.*)$/); if (kv) st.env[kv[1]] = kv[2].replace(/^"(.*)"$/, "$1"); }
         if (I === "RUN" && /(npm (ci|install)|pnpm install|yarn)/.test(rest)) st.size += /--omit=dev|--production|--prod/.test(rest) ? 70 : 380;
         if (I === "RUN" && /npm run build|pnpm (run )?build/.test(rest)) st.size += 20;
+        if (I === "RUN" && /apk (upgrade|-U upgrade)|apt-get (dist-)?upgrade|apt upgrade/.test(rest)) st.patched = true;
         if (I === "RUN" && /apt-get install|apk add/.test(rest)) st.size += /--no-cache|rm -rf \/var\/lib\/apt/.test(rest) ? 15 : 60;
         if (I === "COPY") {
           const from = rest.match(/--from=(\S+)/);
@@ -179,10 +206,26 @@
     const fin = stages[stages.length - 1];
     const [repo, t = "latest"] = tag.split(":");
     s.docker.images = s.docker.images.filter((i) => !(i.repo === repo && i.tag === t));
-    s.docker.images.push({ repo, tag: t, size: Math.round(fin.size) * OD.MB, id: OD.hash(df.content + tag).padEnd(12, "0").slice(0, 12), created: "Less than a second ago", user: fin.user === "root" || fin.user === "0" ? "" : fin.user, stages: stages.length, base: fin.base, env: fin.env, layers: fin.lines });
+    s.docker.images.push({ repo, tag: t, size: Math.round(fin.size) * OD.MB, id: OD.hash(df.content + tag).padEnd(12, "0").slice(0, 12), created: "Less than a second ago", user: fin.user === "root" || fin.user === "0" ? "" : fin.user, stages: stages.length, base: fin.base, env: fin.env, layers: fin.lines, patched: fin.patched });
     s.docker.apps[`${repo}:${t}`] = { ...(s.docker.apps[repo] || {}), user: fin.user === "root" || fin.user === "0" ? "root" : fin.user };
     out.push(` => exporting to image`, ` => => naming to docker.io/library/${repo}:${t}`);
     return out.join("\n");
+  };
+
+  // ---- trivy: scan a local image for known vulnerabilities
+  C.trivy = (ctx) => {
+    const s = ctx.state; const { flags, pos } = parseArgs(ctx.args, ["severity", "exit-code", "format", "f"]);
+    if (pos[0] !== "image" || !pos[1]) return { out: "Usage here: trivy image [--severity CRITICAL,HIGH] [--exit-code 1] [--ignore-unfixed] IMAGE", code: 1 };
+    if (!s.docker) return { out: "FATAL\tunable to find the specified image: no Docker daemon on this host", code: 1 };
+    const ref = pos[1], i = findImg(s, ref.includes(":") ? ref : ref + ":latest");
+    if (!i) return { out: `FATAL\tunable to find the specified image "${ref}" in ["docker" "containerd" "podman" "remote"]: docker error: unable to inspect the image (${ref}): Error response from daemon: No such image: ${ref}`, code: 1 };
+    const sev = flags.severity ? String(flags.severity).toUpperCase().split(",") : ["UNKNOWN", "LOW", "MEDIUM", "HIGH", "CRITICAL"];
+    const { os, vulns } = OD.imageVulns(i), hits = vulns.filter((v) => sev.includes(v[2]));
+    const count = (k) => hits.filter((v) => v[2] === k).length;
+    const head = [`${imgRef(i)} (${os})`, "", `Total: ${hits.length} (${sev.filter((k) => k !== "UNKNOWN").map((k) => `${k}: ${count(k)}`).join(", ")})`];
+    const body = hits.length ? ["", table([["Library", "Vulnerability", "Severity", "Status", "Installed Version", "Fixed Version", "Title"], ...hits.map((v) => [v[0], v[1], v[2], "fixed", v[3], v[4], v[5]])], 2)] : [];
+    const code = flags["exit-code"] && hits.length ? +flags["exit-code"] : 0;
+    return { out: [`INFO\t[vuln] Vulnerability scanning is enabled`, `INFO\tDetected OS\tfamily="${os.split(" ")[0]}" version="${os.split(" ")[1]}"`, "", ...head, ...body].join("\n"), code };
   };
 
   // ---- curl localhost:<port> → the container published on that port

@@ -6,9 +6,9 @@
   const yaml = () => window.jsyaml;
 
   OD.addK8s = (s, k) => {
-    s.k8s = { ns: "default", registry: {}, apps: {}, deployments: [], services: [], configmaps: [], secrets: [], ingresses: [], hpas: [], pods: [], ingressClasses: ["nginx"], history: {}, lastGood: {}, gen: {}, ...k };
+    s.k8s = { ns: "default", registry: {}, apps: {}, deployments: [], services: [], configmaps: [], secrets: [], ingresses: [], hpas: [], pdbs: [], pods: [], cordoned: [], drained: [], ingressClasses: ["nginx"], history: {}, lastGood: {}, gen: {}, ...k };
     s.k8s.deployments.forEach((d) => { normalise(d); if (d._lastGood) s.k8s.lastGood[key(d)] = OD.clone(d._lastGood === true ? d.spec.template : d._lastGood); delete d._lastGood; if (d._history) { s.k8s.history[key(d)] = d._history; delete d._history; } });
-    ["services", "configmaps", "secrets", "ingresses", "hpas"].forEach((t) => s.k8s[t].forEach(normalise));
+    ["services", "configmaps", "secrets", "ingresses", "hpas", "pdbs"].forEach((t) => s.k8s[t].forEach(normalise));
     reconcile(s);
   };
   function normalise(o) { o.metadata = o.metadata || {}; o.metadata.namespace = o.metadata.namespace || "default"; o.metadata.creationTimestamp = o.metadata.creationTimestamp || "2026-11-20T09:14:02Z"; }
@@ -100,6 +100,14 @@
     const want = Math.ceil((a.cpuLoad || 50) / ((req * target) / 100));
     return Math.min(h.spec.maxReplicas, Math.max(h.spec.minReplicas || 1, want));
   }
+  const NODES = ["ip-10-0-11-42", "ip-10-0-12-187"], FQDN = ".eu-west-2.compute.internal";
+  const nodeName = (n) => String(n || "").replace(FQDN, "");
+  // a pod stays where it was scheduled unless its node was drained or it was evicted; new pods avoid cordoned nodes
+  function placeNode(s, i, slot) {
+    const want = NODES[i % 2], other = NODES.find((n) => n !== want), k = s.k8s, born = (k.seen || {})[slot];
+    const off = k.drained.includes(want) || (k.moved || {})[slot] || (k.cordoned.includes(want) && born !== undefined && born >= (k.cordonTick || {})[want]);
+    return off && !k.cordoned.includes(other) ? other : want;
+  }
   function cpuRequest(d) { return parseCpu((((d.spec.template.spec.containers[0].resources || {}).requests) || {}).cpu); }
   function podAge(s, d, slot) {
     const seen = (s.k8s.seen = s.k8s.seen || {});
@@ -112,8 +120,8 @@
     if (ev.ready) s.k8s.lastGood[k] = OD.clone(T);
     const G = s.k8s.lastGood[k], n = desiredReplicas(s, d), out = [];
     const mk = (tmpl, e, i) => {
-      const h = tHash(tmpl), slot = `${k}|${h}|${i}`, gen = s.k8s.gen[slot] || 0;
-      return { name: `${d.metadata.name}-${h}-${OD.suffix(slot + gen)}`, ns, labels: { ...(tmpl.metadata.labels || {}), "pod-template-hash": h }, tmpl, ev: e, slot, owner: d, hash: h, ip: `10.0.${11 + (i % 2)}.${40 + ((parseInt(h.slice(0, 2), 16) + i * 7) % 200)}`, node: i % 2 ? "ip-10-0-12-187" : "ip-10-0-11-42", age: podAge(s, d, slot) };
+      const h = tHash(tmpl), slot = `${k}|${h}|${i}`, gen = s.k8s.gen[slot] || 0, age = podAge(s, d, slot), node = placeNode(s, i, slot);
+      return { name: `${d.metadata.name}-${h}-${OD.suffix(slot + gen)}`, ns, labels: { ...(tmpl.metadata.labels || {}), "pod-template-hash": h }, tmpl, ev: e, slot, owner: d, hash: h, ip: `10.0.${node === NODES[0] ? 11 : 12}.${40 + ((parseInt(h.slice(0, 2), 16) + i * 7) % 200)}`, node, age };
     };
     if (ev.ready) for (let i = 0; i < n; i++) out.push(mk(T, ev, i));
     else if (G && tHash(G) !== tHash(T)) { const gev = evalTemplate(s, ns, G); for (let i = 0; i < n; i++) out.push(mk(G, gev, i)); out.push(mk(T, ev, n)); }
@@ -135,9 +143,10 @@
     node: "nodes", nodes: "nodes", no: "nodes", namespace: "namespaces", namespaces: "namespaces", ns: "namespaces",
     replicaset: "replicasets", replicasets: "replicasets", rs: "replicasets", event: "events", events: "events", ev: "events",
     ingressclass: "ingressclasses", ingressclasses: "ingressclasses", all: "all",
+    pdb: "pdbs", pdbs: "pdbs", poddisruptionbudget: "pdbs", poddisruptionbudgets: "pdbs",
   };
-  const KIND_NAME = { deployments: "deployment.apps", services: "service", configmaps: "configmap", secrets: "secret", ingresses: "ingress.networking.k8s.io", hpas: "horizontalpodautoscaler.autoscaling", pods: "pod" };
-  const API = { Deployment: ["apps/v1", "deployments"], Service: ["v1", "services"], ConfigMap: ["v1", "configmaps"], Secret: ["v1", "secrets"], Ingress: ["networking.k8s.io/v1", "ingresses"], HorizontalPodAutoscaler: ["autoscaling/v2", "hpas"] };
+  const KIND_NAME = { deployments: "deployment.apps", services: "service", configmaps: "configmap", secrets: "secret", ingresses: "ingress.networking.k8s.io", hpas: "horizontalpodautoscaler.autoscaling", pdbs: "poddisruptionbudget.policy", pods: "pod" };
+  const API = { Deployment: ["apps/v1", "deployments"], Service: ["v1", "services"], ConfigMap: ["v1", "configmaps"], Secret: ["v1", "secrets"], Ingress: ["networking.k8s.io/v1", "ingresses"], HorizontalPodAutoscaler: ["autoscaling/v2", "hpas"], PodDisruptionBudget: ["policy/v1", "pdbs"] };
   const nsOf = (s, flags) => (flags.A || flags["all-namespaces"] ? null : flags.n || flags.namespace || s.k8s.ns);
   function splitRef(ref, next) { if (ref && ref.includes("/")) { const [k, n] = ref.split("/"); return [KINDS[k], n]; } return [KINDS[ref], next]; }
   const byName = (s, kind, ns, name) => (s.k8s[kind] || []).find((o) => o.metadata.name === name && o.metadata.namespace === ns);
@@ -172,7 +181,7 @@
     const head = (h) => (ns ? h : ["NAMESPACE", ...h]);
     if (kind === "all") return [K.get(s, ["pods", ...(ns ? ["-n", ns] : ["-A"])]), K.get(s, ["svc", ...(ns ? ["-n", ns] : ["-A"])]), K.get(s, ["deploy", ...(ns ? ["-n", ns] : ["-A"])])].map((x) => x.out || x).join("\n\n");
     if (kind === "namespaces") return table([["NAME", "STATUS", "AGE"], ...[...new Set(["default", "kube-system", ...s.k8s.deployments.map((d) => d.metadata.namespace)])].map((n) => [n, "Active", "41d"])], 3);
-    if (kind === "nodes") return table([["NAME", "STATUS", "ROLES", "AGE", "VERSION"], ["ip-10-0-11-42.eu-west-2.compute.internal", "Ready", "<none>", "41d", "v1.34.1-eks-113cf36"], ["ip-10-0-12-187.eu-west-2.compute.internal", "Ready", "<none>", "41d", "v1.34.1-eks-113cf36"]], 3);
+    if (kind === "nodes") return table([["NAME", "STATUS", "ROLES", "AGE", "VERSION"], ...NODES.map((n) => [n + FQDN, s.k8s.cordoned.includes(n) ? "Ready,SchedulingDisabled" : "Ready", "<none>", "41d", "v1.34.1-eks-113cf36"])], 3);
     if (kind === "ingressclasses") return table([["NAME", "CONTROLLER", "PARAMETERS", "AGE"], ...s.k8s.ingressClasses.map((c) => [c, "nginx.org/ingress-controller", "<none>", "41d"])], 3);
     if (kind === "pods") {
       let list = pods(s, ns).filter((p) => lbl(p.labels)); if (name) list = list.filter((p) => p.name === name);
@@ -203,6 +212,7 @@
     if (kind === "configmaps") return table([head(["NAME", "DATA", "AGE"]), ...list.map((c) => [...nsCol(c), c.metadata.name, Object.keys(c.data || {}).length, age(c)])], 3);
     if (kind === "secrets") return table([head(["NAME", "TYPE", "DATA", "AGE"]), ...list.map((c) => [...nsCol(c), c.metadata.name, c.type || "Opaque", Object.keys(Object.assign({}, c.data, c.stringData)).length, age(c)])], 3);
     if (kind === "ingresses") return table([head(["NAME", "CLASS", "HOSTS", "ADDRESS", "PORTS", "AGE"]), ...list.map((i) => [...nsCol(i), i.metadata.name, i.spec.ingressClassName || "<none>", (i.spec.rules || []).map((r) => r.host).join(","), s.k8s.ingressClasses.includes(i.spec.ingressClassName) ? "a1b2c3d4e5.elb.eu-west-2.amazonaws.com" : "", i.spec.tls ? "80, 443" : "80", age(i)])], 3);
+    if (kind === "pdbs") return table([head(["NAME", "MIN AVAILABLE", "MAX UNAVAILABLE", "ALLOWED DISRUPTIONS", "AGE"]), ...list.map((b) => [...nsCol(b), b.metadata.name, b.spec.minAvailable ?? "N/A", b.spec.maxUnavailable ?? "N/A", allowedDisruptions(s, b), age(b)])], 3);
     if (kind === "hpas") return table([head(["NAME", "REFERENCE", "TARGETS", "MINPODS", "MAXPODS", "REPLICAS", "AGE"]), ...list.map((h) => { const d = byName(s, "deployments", h.metadata.namespace, h.spec.scaleTargetRef.name); const n = d ? desiredReplicas(s, d) : 0; const a = d ? appFor(s, d.spec.template.spec.containers[0].image) : {}; const req = d ? cpuRequest(d) : null; const util = req && n ? `${Math.round(((a.cpuLoad || 50) / n / req) * 100)}%` : "<unknown>"; return [...nsCol(h), h.metadata.name, `Deployment/${h.spec.scaleTargetRef.name}`, `cpu: ${util}/${h.spec.metrics[0].resource.target.averageUtilization}%`, h.spec.minReplicas, h.spec.maxReplicas, n, h._age || "12s"]; })], 3);
     return { out: `error: listing ${kind} isn't supported in this simulator`, code: 1 };
   };
@@ -231,7 +241,7 @@
       const d = byName(s, kind, ns, name); if (!d) return notFound(kind, name);
       const ps = pods(s, ns).filter((p) => p.owner === d), want = desiredReplicas(s, d), ready = ps.filter((p) => p.ev.ready).length, c = d.spec.template.spec.containers[0], newH = tHash(d.spec.template);
       const old = [...new Set(ps.filter((p) => p.hash !== newH).map((p) => p.hash))];
-      return [`Name:                   ${d.metadata.name}`, `Namespace:              ${ns}`, `Selector:               ${Object.entries(d.spec.selector.matchLabels || {}).map(([k, v]) => `${k}=${v}`).join(",")}`, `Replicas:               ${want} desired | ${ps.filter((p) => p.hash === newH).length} updated | ${ps.length} total | ${Math.min(ready, want)} available | ${Math.max(0, want - ready)} unavailable`, `StrategyType:           RollingUpdate`, `Pod Template:`, `  Labels:  ${Object.entries(d.spec.template.metadata.labels || {}).map(([k, v]) => `${k}=${v}`).join(",")}`, `  Containers:`, `   ${c.name}:`, `    Image:      ${c.image}`, `    Port:       ${(c.ports || [{}])[0].containerPort || "<none>"}/TCP`, ...containerDetail(c), `Conditions:`, `  Type           Status  Reason`, `  ----           ------  ------`, `  Available      ${ready >= want ? "True " : "False"}   ${ready >= want ? "MinimumReplicasAvailable" : "MinimumReplicasUnavailable"}`, `  Progressing    True    ${old.length ? "ReplicaSetUpdated" : "NewReplicaSetAvailable"}`, `OldReplicaSets:  ${old.length ? old.map((h) => `${d.metadata.name}-${h}`).join(", ") : "<none>"}`, `NewReplicaSet:   ${d.metadata.name}-${newH} (${ps.filter((p) => p.hash === newH).length}/${ps.filter((p) => p.hash === newH).length} replicas created)`, `Events:          <none>`].join("\n");
+      return [`Name:                   ${d.metadata.name}`, `Namespace:              ${ns}`, `Selector:               ${Object.entries(d.spec.selector.matchLabels || {}).map(([k, v]) => `${k}=${v}`).join(",")}`, `Replicas:               ${want} desired | ${ps.filter((p) => p.hash === newH).length} updated | ${ps.length} total | ${Math.min(ready, want)} available | ${Math.max(0, want - ready)} unavailable`, `StrategyType:           ${(d.spec.strategy || {}).type || "RollingUpdate"}`, `MinReadySeconds:        ${d.spec.minReadySeconds || 0}`, ...(((d.spec.strategy || {}).type || "RollingUpdate") === "RollingUpdate" ? [`RollingUpdateStrategy:  ${rollingOf(d).maxUnavailable} max unavailable, ${rollingOf(d).maxSurge} max surge`] : []), `Pod Template:`, `  Labels:  ${Object.entries(d.spec.template.metadata.labels || {}).map(([k, v]) => `${k}=${v}`).join(",")}`, `  Containers:`, `   ${c.name}:`, `    Image:      ${c.image}`, `    Port:       ${(c.ports || [{}])[0].containerPort || "<none>"}/TCP`, ...containerDetail(c), `Conditions:`, `  Type           Status  Reason`, `  ----           ------  ------`, `  Available      ${ready >= want ? "True " : "False"}   ${ready >= want ? "MinimumReplicasAvailable" : "MinimumReplicasUnavailable"}`, `  Progressing    True    ${old.length ? "ReplicaSetUpdated" : "NewReplicaSetAvailable"}`, `OldReplicaSets:  ${old.length ? old.map((h) => `${d.metadata.name}-${h}`).join(", ") : "<none>"}`, `NewReplicaSet:   ${d.metadata.name}-${newH} (${ps.filter((p) => p.hash === newH).length}/${ps.filter((p) => p.hash === newH).length} replicas created)`, `Events:          <none>`].join("\n");
     }
     if (kind === "services") {
       const v = byName(s, kind, ns, name); if (!v) return notFound(kind, name);
@@ -257,7 +267,7 @@
         known ? "  ScalingActive   True    ValidMetricFound" : "  ScalingActive   False   FailedGetResourceMetric",
         "Events:", known ? "  <none>" : `  Warning  FailedGetResourceMetric  12s (x41 over 20m)  horizontal-pod-autoscaler  failed to get cpu utilization: missing request for cpu in container ${c ? c.name : "?"} of Pod ${p ? p.name : "?"}`].join("\n");
     }
-    if (kind === "nodes") return "Name:  ip-10-0-11-42.eu-west-2.compute.internal\nRoles: <none>\nConditions:\n  Ready   True   KubeletReady   kubelet is posting ready status\nAllocatable:\n  cpu:     1930m\n  memory:  7302072Ki\n  pods:    35";
+    if (kind === "nodes") { const n = nodeName(name) || NODES[0]; if (!NODES.includes(n)) return notFound("nodes", name); const here = pods(s, null).filter((p) => p.node === n); return [`Name:               ${n}${FQDN}`, "Roles:              <none>", `Unschedulable:      ${s.k8s.cordoned.includes(n)}`, "Conditions:", "  Ready   True   KubeletReady   kubelet is posting ready status", "Allocatable:", "  cpu:     1930m", "  memory:  7302072Ki", "  pods:    35", `Non-terminated Pods:          (${here.length + 2} in total)`, "  Namespace     Name", "  ---------     ----", `  kube-system   aws-node-${OD.suffix(n)}`, `  kube-system   kube-proxy-${OD.suffix(n + "p")}`, ...here.map((p) => `  ${p.ns.padEnd(13)} ${p.name}`)].join("\n"); }
     return { out: `error: the server doesn't have a resource type "${pos[0] || ""}"`, code: 1 };
   };
   function containerDetail(c) {
@@ -297,12 +307,27 @@
       const sel = (obj.spec.selector || {}).matchLabels || {}, tl = ((obj.spec.template || {}).metadata || {}).labels || {};
       if (!matches(sel, tl)) return { out: `The Deployment "${obj.metadata.name}" is invalid: spec.template.metadata.labels: Invalid value: map[string]string{${Object.entries(tl).map(([k, v]) => `"${k}":"${v}"`).join(", ")}}: \`selector\` does not match template \`labels\``, code: 1 };
       if (i >= 0 && JSON.stringify(list[i].spec.selector) !== JSON.stringify(obj.spec.selector)) return { out: `The Deployment "${obj.metadata.name}" is invalid: spec.selector: Invalid value: ... field is immutable`, code: 1 };
+      const ru = rollingOf(obj), n = obj.spec.replicas ?? 1;
+      if (((obj.spec.strategy || {}).type || "RollingUpdate") === "RollingUpdate" && scaledPods(ru.maxUnavailable, n, false) === 0 && scaledPods(ru.maxSurge, n, true) === 0) return { out: `The Deployment "${obj.metadata.name}" is invalid: spec.strategy.rollingUpdate.maxUnavailable: Invalid value: intstr.IntOrString{…}: may not be 0 when \`maxSurge\` is 0`, code: 1 };
       if (i >= 0 && tHash(list[i].spec.template) !== tHash(obj.spec.template)) recordRevision(s, list[i]);
     }
     if (obj.kind === "Secret" && obj.stringData) { obj.data = { ...(obj.data || {}), ...Object.fromEntries(Object.entries(obj.stringData).map(([k, v]) => [k, btoa(String(v))])) }; delete obj.stringData; }
     if (i >= 0) { const same = JSON.stringify(list[i]) === JSON.stringify(obj); obj.metadata.creationTimestamp = list[i].metadata.creationTimestamp; list[i] = obj; return `${label} ${same ? "unchanged" : verbPast}`; }
     list.push(obj); return `${label} created`;
   }
+  // rolling-update maths, as Kubernetes does it: maxUnavailable rounds down, maxSurge rounds up
+  function rollingOf(d) { const r = ((d.spec.strategy || {}).rollingUpdate) || {}; return { maxUnavailable: r.maxUnavailable ?? "25%", maxSurge: r.maxSurge ?? "25%" }; }
+  function scaledPods(v, n, up) { const m = String(v).match(/^(\d+)%$/); if (m) return up ? Math.ceil((+m[1] * n) / 100) : Math.floor((+m[1] * n) / 100); return +v || 0; }
+  OD.k8sRolling = (d) => { const r = rollingOf(d), n = d.spec.replicas ?? 1; return { maxUnavailable: scaledPods(r.maxUnavailable, n, false), maxSurge: scaledPods(r.maxSurge, n, true), replicas: n }; };
+  // PodDisruptionBudgets
+  function pdbPods(s, b) { return pods(s, b.metadata.namespace).filter((p) => p.owner && matches(b.spec.selector && b.spec.selector.matchLabels, p.labels)); }
+  function allowedDisruptions(s, b) {
+    const ps = pdbPods(s, b), healthy = ps.filter((p) => p.ev.ready).length, want = ps.length ? desiredReplicas(s, ps[0].owner) : 0;
+    if (b.spec.minAvailable !== undefined) return Math.max(0, healthy - scaledPods(b.spec.minAvailable, want, true));
+    if (b.spec.maxUnavailable !== undefined) return Math.max(0, scaledPods(b.spec.maxUnavailable, want, false) - (want - healthy));
+    return 0;
+  }
+  OD.k8sAllowedDisruptions = allowedDisruptions;
   function recordRevision(s, d) { const k = key(d); (s.k8s.history[k] = s.k8s.history[k] || []).push(OD.clone(d.spec.template)); }
 
   K.apply = (s, args, ctx) => {
@@ -340,6 +365,8 @@
     const [kind, name] = splitRef(pos[0], pos[1]);
     if (kind === "pods") {
       const p = pods(s, ns).find((x) => x.name === name); if (!p) return notFound("pods", name);
+      const pdb = p.slot && s.k8s.pdbs.find((b) => b.metadata.namespace === p.ns && matches(b.spec.selector && b.spec.selector.matchLabels, p.labels));
+      if (pdb && allowedDisruptions(s, pdb) <= 0) s.k8s.pdbViolated = true; // a plain delete ignores PodDisruptionBudgets
       if (p.slot) { s.k8s.gen[p.slot] = (s.k8s.gen[p.slot] || 0) + 1; return `pod "${name}" deleted`; }
       s.k8s.pods = s.k8s.pods.filter((x) => x.name !== name); return `pod "${name}" deleted`;
     }
@@ -392,6 +419,32 @@
     if (sub === "restart") { recordRevision(s, d); d.spec.template.metadata.annotations = { ...(d.spec.template.metadata.annotations || {}), "kubectl.kubernetes.io/restartedAt": `2026-11-26T10:${30 + (s.tick % 29)}:00Z` }; return `deployment.apps/${name} restarted`; }
     return { out: "error: rollout supports status, history, undo and restart here", code: 1 };
   };
+  K.cordon = K.uncordon = (s, args, ctx) => {
+    const n = nodeName(args.find((a) => !a.startsWith("-"))); if (!NODES.includes(n)) return notFound("nodes", args[0] || "");
+    if (ctx.args[0] === "cordon") { if (!s.k8s.cordoned.includes(n)) { s.k8s.cordoned.push(n); (s.k8s.cordonTick = s.k8s.cordonTick || {})[n] = s.tick; } return `node/${n}${FQDN} cordoned`; }
+    s.k8s.cordoned = s.k8s.cordoned.filter((x) => x !== n); s.k8s.drained = s.k8s.drained.filter((x) => x !== n); s.k8s.moved = {}; return `node/${n}${FQDN} uncordoned`;
+  };
+  K.drain = (s, args) => {
+    const { flags, pos } = parseArgs(args, ["timeout", "grace-period"]); const n = nodeName(pos[0]);
+    if (!NODES.includes(n)) return notFound("nodes", pos[0] || "");
+    if (!s.k8s.cordoned.includes(n)) { s.k8s.cordoned.push(n); (s.k8s.cordonTick = s.k8s.cordonTick || {})[n] = s.tick; }
+    const out = [`node/${n}${FQDN} cordoned`];
+    if (!flags["ignore-daemonsets"]) return { out: out.concat(`error: unable to drain node "${n}${FQDN}" due to error: cannot delete DaemonSet-managed Pods (use --ignore-daemonsets to ignore): kube-system/aws-node-${OD.suffix(n)}, kube-system/kube-proxy-${OD.suffix(n + "p")}, continuing command...`, "There are pending nodes to be drained:", ` ${n}${FQDN}`).join("\n"), code: 1 };
+    out.push(`Warning: ignoring DaemonSet-managed Pods: kube-system/aws-node-${OD.suffix(n)}, kube-system/kube-proxy-${OD.suffix(n + "p")}`);
+    const blocked = [];
+    for (const p of pods(s, null).filter((x) => x.node === n && x.slot)) {
+      const pdb = s.k8s.pdbs.find((b) => b.metadata.namespace === p.ns && matches(b.spec.selector && b.spec.selector.matchLabels, p.labels));
+      if (pdb && !flags["disable-eviction"] && allowedDisruptions(s, pdb) <= 0) { blocked.push(p); out.push(`error when evicting pods/"${p.name}" -n "${p.ns}" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.`); continue; }
+      if (flags["disable-eviction"]) s.k8s.forcedDrain = true;
+      out.push(`${flags["disable-eviction"] ? "pod" : "evicting pod"} ${p.ns}/${p.name}${flags["disable-eviction"] ? " deleted" : ""}`);
+      // the replacement is scheduled on another node and becomes Ready before the next eviction
+      (s.k8s.moved = s.k8s.moved || {})[p.slot] = true;
+      s.k8s.gen[p.slot] = (s.k8s.gen[p.slot] || 0) + 1;
+    }
+    if (blocked.length) { return { out: out.concat(`error: unable to drain node "${n}${FQDN}" due to error: ${blocked.length} pod(s) could not be evicted: their PodDisruptionBudget allows 0 disruptions. Drain gives up here; a real one keeps retrying until you stop it.`, "There are pending nodes to be drained:", ` ${n}${FQDN}`).join("\n"), code: 1 }; }
+    if (!s.k8s.drained.includes(n)) s.k8s.drained.push(n);
+    return out.concat(`node/${n}${FQDN} drained`).join("\n");
+  };
   K.exec = (s, args) => {
     const { flags, pos } = parseArgs(args, ["n", "namespace", "c"]); const ns = nsOf(s, flags) || s.k8s.ns;
     const ref = pos[0]; let p;
@@ -425,6 +478,75 @@
   K.explain = (s, args) => `Use 'kubectl explain ${args[0] || "pod.spec"}' on a real cluster for field docs. Here, check the Binder for this ticket.`;
   K.version = () => "Client Version: v1.34.1\nServer Version: v1.34.1-eks-113cf36";
   K["cluster-info"] = () => "Kubernetes control plane is running at https://A1B2C3D4.gr7.eu-west-2.eks.amazonaws.com\nCoreDNS is running at https://A1B2C3D4.gr7.eu-west-2.eks.amazonaws.com/api/v1/namespaces/kube-system/services/kube-dns:dns/proxy";
+
+  // ------------------------------------------------------------------ helm (v3 keeps each release revision in a Secret)
+  const HELM_TYPE = "helm.sh/release.v1";
+  const relSecrets = (s, ns, name) => s.k8s.secrets.filter((x) => x.type === HELM_TYPE && x.metadata.namespace === ns && (!name || (x.metadata.labels || {}).name === name)).sort((a, b) => +a.metadata.labels.version - +b.metadata.labels.version);
+  const relOf = (x) => ({ ...(x._release || {}), name: x.metadata.labels.name, version: +x.metadata.labels.version, status: x.metadata.labels.status, ns: x.metadata.namespace });
+  OD.helmRelease = (s, ns, name) => relSecrets(s, ns, name).map(relOf);
+  OD.helmSecret = (ns, name, version, status, rel) => ({ apiVersion: "v1", kind: "Secret", type: HELM_TYPE, metadata: { name: `sh.helm.release.v1.${name}.v${version}`, namespace: ns, labels: { name, owner: "helm", status, version: String(version) } }, data: { release: btoa(`H4sIAAAAAAAC/+y9a3PbOJYw/Fd...${name}.v${version}`) }, _release: rel });
+  const deepMerge = (a, b) => { const o = { ...(a || {}) }; for (const [k, v] of Object.entries(b || {})) o[k] = v && typeof v === "object" && !Array.isArray(v) ? deepMerge(o[k], v) : v; return o; };
+  const setPath = (o, path, v) => { const ks = path.split("."); let c = o; ks.slice(0, -1).forEach((k) => { c[k] = c[k] && typeof c[k] === "object" ? c[k] : {}; c = c[k]; }); c[ks[ks.length - 1]] = /^\d+$/.test(v) ? +v : v === "true" ? true : v === "false" ? false : v; };
+  function helmApply(s, ns, name, values) {
+    // the chart renders one Deployment named after the release
+    const d = byName(s, "deployments", ns, name); if (!d) return `deployment "${name}" not found`;
+    const c = d.spec.template.spec.containers[0], img = values.image || {};
+    const before = OD.clone(d.spec.template);
+    if (img.repository && img.tag) c.image = `${img.repository}:${img.tag}`;
+    if (values.replicaCount !== undefined) d.spec.replicas = +values.replicaCount;
+    if (values.resources) c.resources = OD.clone(values.resources);
+    d.metadata.annotations = { ...(d.metadata.annotations || {}), "meta.helm.sh/release-name": name, "meta.helm.sh/release-namespace": ns };
+    if (tHash(before) !== tHash(d.spec.template)) (s.k8s.history[key(d)] = s.k8s.history[key(d)] || []).push(before);
+    return null;
+  }
+  C.helm = (ctx) => {
+    const s = ctx.state; if (!s.k8s) return { out: "helm: command not found", code: 127 };
+    const { flags, pos } = parseArgs(ctx.args, ["n", "namespace", "f", "values", "set", "revision", "timeout", "o", "output"]);
+    const ns = flags.n || flags.namespace || s.k8s.ns, now = "2026-11-26 10:31:07.412 +0000 UTC";
+    const [verb, name, arg] = pos[0] === "get" ? [pos[0], pos[2], pos[1]] : pos; // helm get values RELEASE
+    const sets = []; ctx.args.forEach((a, i) => { if (a === "--set") sets.push(ctx.args[i + 1]); else if (a.startsWith("--set=")) sets.push(a.slice(6)); });
+    const all = relSecrets(s, ns), latestOf = (n) => { const r = relSecrets(s, ns, n); return r.length ? relOf(r[r.length - 1]) : null; };
+    const row = (r) => [r.name, r.ns, r.version, r.updated || now, r.status, r.chart, r.appVersion];
+    if (verb === "version") return 'version.BuildInfo{Version:"v3.16.3", GitCommit:"cfd07493f46efc9debd9cc1b02a0961186df7fdf", GoVersion:"go1.22.7"}';
+    if (verb === "list" || verb === "ls") {
+      const names = [...new Set(all.map((x) => x.metadata.labels.name))], rows = names.map(latestOf).filter((r) => flags.a || flags.all || flags.pending ? true : ["deployed", "failed"].includes(r.status));
+      return table([["NAME", "NAMESPACE", "REVISION", "UPDATED", "STATUS", "CHART", "APP VERSION"], ...rows.map(row)], 1);
+    }
+    if (!name && verb) return { out: `Error: "helm ${verb}" requires a release name`, code: 1 };
+    const hist = relSecrets(s, ns, name).map(relOf);
+    if (["status", "history", "get", "rollback", "uninstall"].includes(verb) && !hist.length) return { out: `Error: release: not found`, code: 1 };
+    if (verb === "status") { const r = hist[hist.length - 1]; return [`NAME: ${r.name}`, `LAST DEPLOYED: ${r.updated || now}`, `NAMESPACE: ${ns}`, `STATUS: ${r.status}`, `REVISION: ${r.version}`, `DESCRIPTION: ${r.description || ""}`].join("\n"); }
+    if (verb === "history") return table([["REVISION", "UPDATED", "STATUS", "CHART", "APP VERSION", "DESCRIPTION"], ...hist.map((r) => [r.version, r.updated || now, r.status, r.chart, r.appVersion, r.description || ""])], 1);
+    if (verb === "get") { const r = flags.revision ? hist.find((x) => x.version === +flags.revision) : hist[hist.length - 1]; if (!r) return { out: "Error: release: not found", code: 1 }; return arg !== "values" ? { out: "Supported here: helm get values RELEASE [--revision N]", code: 1 } : `USER-SUPPLIED VALUES:\n${yaml().dump(r.values || {}).trimEnd()}`; }
+    const setStatus = (r, st) => { const x = s.k8s.secrets.find((y) => y.metadata.name === `sh.helm.release.v1.${r.name}.v${r.version}` && y.metadata.namespace === ns); if (x) x.metadata.labels.status = st; };
+    const next = (hist.length ? hist[hist.length - 1].version : 0) + 1;
+    if (verb === "rollback") {
+      const target = arg ? hist.find((r) => r.version === +arg) : hist[hist.length - 2];
+      if (!target) return { out: arg ? `Error: release has no ${arg} version` : "Error: release has no previous version to roll back to", code: 1 };
+      const err = helmApply(s, ns, name, target.values || {}); if (err) return { out: `Error: ${err}`, code: 1 };
+      hist.forEach((r) => setStatus(r, r.status === "deployed" ? "superseded" : r.status.startsWith("pending") ? "failed" : r.status));
+      s.k8s.secrets.push(OD.helmSecret(ns, name, next, "deployed", { chart: target.chart, appVersion: target.appVersion, values: OD.clone(target.values || {}), updated: now, description: `Rollback to ${target.version}` }));
+      return "Rollback was a success! Happy Helming!";
+    }
+    if (verb === "upgrade" || verb === "install") {
+      const last = hist[hist.length - 1];
+      if (last && last.status.startsWith("pending")) return { out: `Error: UPGRADE FAILED: another operation (install/upgrade/rollback) is in progress`, code: 1 };
+      if (verb === "install" && last) return { out: `Error: INSTALLATION FAILED: cannot re-use a name that is still in use`, code: 1 };
+      if (!arg) return { out: `Error: "helm ${verb}" requires 2 arguments\n\nUsage:  helm ${verb} [RELEASE] [CHART] [flags]`, code: 1 };
+      const dir = s.fs.norm(s.cwd, arg), chartF = s.fs.get(dir + "/Chart.yaml");
+      if (!chartF) return { out: `Error: path "${arg}" not found`, code: 1 };
+      let chart, values; try { chart = yaml().load(chartF.content) || {}; values = yaml().load((s.fs.get(dir + "/values.yaml") || { content: "" }).content) || {}; } catch (e) { return { out: `Error: ${String(e.message).split("\n")[0]}`, code: 1 }; }
+      let user = {};
+      for (const f of [flags.f, flags.values].filter(Boolean)) { const vf = s.fs.get(s.fs.norm(s.cwd, f)); if (!vf) return { out: `Error: open ${f}: no such file or directory`, code: 1 }; try { user = deepMerge(user, yaml().load(vf.content) || {}); } catch (e) { return { out: `Error: failed to parse ${f}: ${String(e.message).split("\n")[0]}`, code: 1 }; } }
+      for (const kv of sets) { const [p, ...v] = String(kv).split("="); setPath(user, p, v.join("=")); }
+      const merged = deepMerge(values, user), err = helmApply(s, ns, name, merged); if (err) return { out: `Error: UPGRADE FAILED: ${err}`, code: 1 };
+      hist.forEach((r) => setStatus(r, r.status === "deployed" ? "superseded" : r.status));
+      s.k8s.secrets.push(OD.helmSecret(ns, name, next, "deployed", { chart: `${chart.name}-${chart.version}`, appVersion: String(chart.appVersion || (merged.image || {}).tag || ""), values: user, updated: now, description: verb === "install" ? "Install complete" : "Upgrade complete" }));
+      return [`Release "${name}" has been upgraded. Happy Helming!`, `NAME: ${name}`, `LAST DEPLOYED: Thu Nov 26 10:31:07 2026`, `NAMESPACE: ${ns}`, "STATUS: deployed", `REVISION: ${next}`].join("\n");
+    }
+    if (verb === "uninstall") { s.k8s.deployments = s.k8s.deployments.filter((d) => !(d.metadata.name === name && d.metadata.namespace === ns)); s.k8s.secrets = s.k8s.secrets.filter((x) => !(x.type === HELM_TYPE && x.metadata.labels.name === name)); return `release "${name}" uninstalled`; }
+    return { out: "Supported here: helm list [-a], status, history, get values, upgrade RELEASE CHART [-f values.yaml] [--set k=v], rollback RELEASE [REVISION], uninstall", code: 1 };
+  };
 
   // ------------------------------------------------------------------ in-cluster HTTP: Services and Ingress
   function serveFromService(s, svc, url) {

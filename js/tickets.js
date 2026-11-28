@@ -54,6 +54,9 @@
 `;
   const STORE_HTML = '<!doctype html><title>Parcelwise · Track your parcel</title><h1>📦 Parcelwise</h1><p>Enter your tracking number…</p>';
 
+  // what nginx has in memory: the config and certificates as they were at its last start/reload
+  const nginxSnap = (st) => ({ conf: st.fs.walk("/etc/nginx/sites-enabled").filter((x) => !x.dir).map((x) => st.fs.get(x.p).content).join("\n"), certs: OD.clone(st.certs || {}) });
+  const stripComments = (t) => t.split("\n").map((l) => l.replace(/#.*$/, "")).join("\n");
   // a standard web server: nginx in front of the parcelwise-api app on :8080
   function webHost(opts = {}) {
     const s = OD.newHost({ host: opts.host || "web-01", diskBase: opts.diskBase, diskTotal: opts.diskTotal, files: {
@@ -63,7 +66,7 @@
       "/home/ops/README.txt": { content: "Welcome to web-01 (Parcelwise production web).\nApp: parcelwise-api on :8080 behind nginx on :80.\nLogs: /var/log/parcelwise/ and /var/log/nginx/\n" },
       ...(opts.files || {}) }, groups: opts.groups, users: opts.users });
     OD.addService(s, "parcelwise-api", { desc: "Parcelwise API", port: 8080, bind: "127.0.0.1", proc: { cmd: "/usr/local/bin/parcelwise-api --port 8080", user: "www", cpu: 2.1, mem: 6.4 }, holds: ["/var/log/parcelwise/app.log"], active: opts.apiActive !== false });
-    OD.addService(s, "nginx", { desc: "A high performance web server and a reverse proxy server", port: 80, proc: { cmd: "nginx: master process /usr/sbin/nginx -g daemon on; master_process on;", user: "root", cpu: 0.1, mem: 0.4 }, check: (st) => { const r = OD.nginxCheck(st); return r.ok ? { ok: true } : { ok: false, journal: [r.err, "nginx: configuration file /etc/nginx/nginx.conf test failed"] }; }, active: opts.nginxActive });
+    OD.addService(s, "nginx", { desc: "A high performance web server and a reverse proxy server", port: 80, proc: { cmd: "nginx: master process /usr/sbin/nginx -g daemon on; master_process on;", user: "root", cpu: 0.1, mem: 0.4 }, check: (st) => { const r = OD.nginxCheck(st); if (r.ok) st.nginxLoaded = nginxSnap(st); return r.ok ? { ok: true } : { ok: false, journal: [r.err, "nginx: configuration file /etc/nginx/nginx.conf test failed"] }; }, active: opts.nginxActive });
     s.web = (url, st) => {
       if (!["localhost", "127.0.0.1", st.host, "parcelwise.test"].includes(url.hostname)) return null;
       const port = +(url.port || 80);
@@ -92,7 +95,7 @@
   const ing = (name, host, paths, cls = "nginx") => ({ apiVersion: "networking.k8s.io/v1", kind: "Ingress", metadata: { name, namespace: "shop" }, spec: { ingressClassName: cls, rules: [{ host, http: { paths: paths.map(([path, svcName]) => ({ path, pathType: "Prefix", backend: { service: { name: svcName, port: { number: 80 } } } })) } }] } });
   const cm = (name, data) => ({ apiVersion: "v1", kind: "ConfigMap", metadata: { name, namespace: "shop" }, data });
   const REG = {
-    "parcelwise/storefront": ["5.4.0", "5.4.1"], "parcelwise/checkout-api": ["3.1.4", "3.2.0"], "parcelwise/tracking-api": ["1.8.0", "1.9.2"],
+    "parcelwise/storefront": ["5.4.0", "5.4.1", "5.5.0"], "parcelwise/checkout-api": ["3.1.4", "3.2.0"], "parcelwise/tracking-api": ["1.8.0", "1.9.2"],
     "parcelwise/notify": ["0.9.1"], "parcelwise/label-renderer": ["2.0.3"], "parcelwise/payments-api": ["3.9.2", "4.0.0", "4.0.1"], "parcelwise/search-api": ["1.2.0"], "parcelwise/status-page": ["1.0.1"],
     "parcelwise/returns-api": ["1.0.0"], "parcelwise/orders-api": ["2.4.1"], "parcelwise/scanner-gateway": ["2.3.0"],
   };
@@ -238,6 +241,72 @@
       hints: ["What does /var/log/auth.log say about jlee? (it's root-only, so use sudo)", "'bad ownership or modes': the file is owned by root and is mode 666, so anyone can write to it.", "sudo chown jlee:jlee /home/jlee/.ssh/authorized_keys && sudo chmod 600 /home/jlee/.ssh/authorized_keys"],
       checks: (s) => { const f = s.fs.get("/home/jlee/.ssh/authorized_keys"), m = f ? f.mode.split("").map(Number) : [0, 0, 0]; return [check("Jordan's key is still in authorized_keys", f && f.content.includes("jordan@parcelwise-laptop")), check("The file belongs to jlee", f && f.owner === "jlee"), check("Only jlee can change it (not writable by group or others)", f && !(m[1] & 2) && !(m[2] & 2)), check("jlee can still read it", f && m[0] & 4)]; },
       debrief: "SSH is strict on purpose: if anyone else could edit <code>authorized_keys</code>, they could add their own key and log in as that user. It wants the file owned by the user and not writable by anyone else (600 is normal, and <code>~/.ssh</code> itself should be 700). Files you copy with sudo end up owned by root, so fix the owner afterwards. Better still, manage keys with config management, or avoid them with SSO-based access such as AWS SSM Session Manager." },
+
+    { id: "PW-109", rank: 0, xp: 110, priority: "Critical", from: "tom", title: "\"Your connection is not private\"",
+      message: "Customers are getting a big red <b>'Your connection is not private'</b> warning on https://parcelwise.test since this morning, and most of them leave 😬 Didn't we set up automatic certificate renewal ages ago?",
+      topic: "TLS certificates",
+      setup: () => {
+        const live = "/etc/letsencrypt/live/parcelwise.test", cert = `${live}/fullchain.pem`, key = `${live}/privkey.pem`;
+        const site = nginxSite.replace("    listen 80;\n", `    listen 80;\n    listen 443 ssl;\n    ssl_certificate ${cert};\n    ssl_certificate_key ${key};\n`);
+        const pem = "-----BEGIN CERTIFICATE-----\nMIIFBjCCA+6gAwIBAgISBKGx7oQh9uSn0Qd0pXhFh2mZMA0GCSqGSIb3DQEBCwUA\n…\n-----END CERTIFICATE-----\n";
+        const s = webHost({ site, files: {
+          [cert]: { content: pem, owner: "root" }, [key]: { content: "-----BEGIN PRIVATE KEY-----\n…\n-----END PRIVATE KEY-----\n", owner: "root", mode: "600" },
+          "/etc/letsencrypt/renewal/parcelwise.test.conf": { content: "# renew_before_expiry = 30 days\nversion = 2.11.0\ncert = /etc/letsencrypt/live/parcelwise.test/cert.pem\nfullchain = /etc/letsencrypt/live/parcelwise.test/fullchain.pem\n\n[renewalparams]\nauthenticator = webroot\nwebroot_path = /var/www/letsencrypt,\nserver = https://acme-v02.api.letsencrypt.org/directory\n", owner: "root" },
+          "/var/log/letsencrypt/letsencrypt.log": { content: "2026-08-27 09:14:03,112:INFO:certbot._internal.renewal:Cert not yet due for renewal\n2026-08-27 21:14:03,509:INFO:certbot._internal.main:Renewing an existing certificate for parcelwise.test and www.parcelwise.test\n2026-08-27 21:14:09,001:INFO:certbot._internal.renewal:Congratulations, all renewals succeeded\n", owner: "root", mode: "600" },
+        } });
+        s.certs = { [cert]: { subject: "CN = parcelwise.test", issuer: "C = US, O = Let's Encrypt, CN = R11", notBefore: "Aug 27 20:15:31 2026 GMT", notAfter: "Nov 25 20:15:30 2026 GMT", notAfterIso: "2026-11-25 20:15:30+00:00", serial: "04A1B17EE842F6E4A7D1077D29785876", san: ["parcelwise.test", "www.parcelwise.test"], expired: true } };
+        s.letsencrypt = { "parcelwise.test": { cert, key, renewed: { notBefore: "Nov 26 09:31:07 2026 GMT", notAfter: "Feb 24 09:31:06 2027 GMT", notAfterIso: "2027-02-24 09:31:06+00:00", serial: "037F5C02D9E4A0B3F1C8D2E6A9B4C7D1" } } };
+        s.nginxLoaded = nginxSnap(s);
+        OD.addService(s, "certbot.timer", { desc: "Run certbot twice daily", active: false, activates: "certbot.service", last: "Wed 2026-09-02 11:02:44 UTC" });
+        s.services["certbot.timer"].enabled = false;
+        s.journal["certbot.timer"] = ["systemd[1]: certbot.timer: Deactivated successfully.", "systemd[1]: Stopped certbot.timer - Run certbot twice daily.", "systemd[1]: Removed \"/etc/systemd/system/timers.target.wants/certbot.timer\"."];
+        s.tlsServing = () => (s.services.nginx.active ? (s.nginxLoaded.certs || {})[cert] : null);
+        const web = s.web;
+        s.web = (url, st) => { if (url.protocol === "https:" && ["localhost", "parcelwise.test", "www.parcelwise.test", st.host].includes(url.hostname)) { const c = st.tlsServing(); if (!c) return null; if (c.expired) return { error: 60, msg: "curl: (60) SSL certificate problem: certificate has expired\nMore details here: https://curl.se/docs/sslcerts.html" }; } return web(url, st); };
+        return s;
+      },
+      sop: ["Confirm it: <code>curl -I https://parcelwise.test</code>, then look at the certificate: <code>openssl x509 -in /etc/letsencrypt/live/parcelwise.test/fullchain.pem -noout -dates</code>.", "Let's Encrypt certificates last 90 days, and renewal is meant to run automatically. Is it? <code>systemctl list-timers</code> / <code>systemctl status certbot.timer</code>.", "Renew: <code>sudo certbot renew</code>. Then make nginx load the new certificate: it keeps the old one in memory until you <code>sudo systemctl reload nginx</code>.", "Turn automatic renewal back on: <code>sudo systemctl enable --now certbot.timer</code>."],
+      hints: ["openssl x509 … -noout -dates on the certificate. When did it expire? And why didn't it renew?", "certbot.timer is disabled, so nothing has tried to renew since September. Renew by hand, reload nginx, and re-enable the timer.", "sudo certbot renew && sudo systemctl reload nginx && sudo systemctl enable --now certbot.timer && curl -I https://parcelwise.test"],
+      checks: (s) => { const c = s.tlsServing && s.tlsServing(), t = s.services["certbot.timer"]; return [check("The certificate on disk has been renewed", !s.certs["/etc/letsencrypt/live/parcelwise.test/fullchain.pem"].expired), check("nginx is serving the renewed certificate", c && !c.expired), check("Automatic renewal is back on (certbot.timer enabled and running)", t.enabled && t.active), check("https://parcelwise.test returns 200", http200(s, "https://parcelwise.test/"))]; },
+      debrief: "Expired certificates are one of the most common avoidable outages, and they usually fail for boring reasons: the renewal timer was switched off, the renewal ran but nginx was never reloaded, or a firewall blocked the challenge. Run <code>certbot renew --dry-run</code> after any change, add a <b>deploy hook</b> (<code>--deploy-hook \"systemctl reload nginx\"</code>) so new certificates are picked up automatically, and alert on certificate expiry (for example 14 days out) from outside the server. In AWS, certificates on a load balancer from ACM renew themselves." },
+
+    { id: "PW-110", rank: 0, xp: 110, priority: "High", from: "jess", title: "Someone is scraping tracking numbers",
+      message: "The tracking pages have been slow all morning and I think someone is scraping us: thousands of requests for tracking numbers in order 🕵🏻‍♀️ Can you find the IP address in web-01's nginx access log and block it at nginx? Please don't block real customers or our office (10.0.1.17)!",
+      topic: "Log analysis",
+      setup: () => {
+        const bad = "203.0.113.77", ok = ["10.0.1.17", "81.2.69.142", "86.140.11.23", "92.40.177.8", "185.31.18.4", "51.140.22.97", "2.29.61.200"];
+        const ts = (i) => `26/Nov/2026:${String(8 + Math.floor(i / 120)).padStart(2, "0")}:${String(Math.floor(i / 2) % 60).padStart(2, "0")}:${String((i * 7) % 60).padStart(2, "0")} +0000`;
+        const lines = [];
+        for (let i = 0; i < 420; i++) {
+          if (i % 7 !== 3 && i % 11 !== 5) lines.push(`${bad} - - [${ts(i)}] "GET /track?id=PW-${String(480000 + i).padStart(6, "0")} HTTP/1.1" ${i % 9 === 0 ? 429 : 200} 512 "-" "python-requests/2.32.3"`);
+          else { const ip = ok[Math.floor(i / 5) % ok.length]; lines.push(`${ip} - - [${ts(i)}] "GET ${["/", "/track?id=PW-48213", "/checkout", "/health", "/returns"][i % 5]} HTTP/1.1" 200 ${4000 + i} "https://parcelwise.test/" "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X)"`); }
+        }
+        return webHost({ files: { "/var/log/nginx/parcelwise.access.log": { content: lines.join("\n") + "\n", owner: "root", group: "adm", mode: "640", size: 61 * OD.MB } } });
+      },
+      sop: ["The access log is <code>/var/log/nginx/parcelwise.access.log</code> (root-only, so use <code>sudo</code>). Each line starts with the client's IP address.", "Count requests per IP: <code>sudo awk '{print $1}' FILE | sort | uniq -c | sort -rn | head</code>. Check what the top one asks for with <code>sudo grep IP FILE | tail</code>.", "Block it in the site config: add <code>deny IP;</code> inside the <code>server { }</code> block with <code>sudo nano /etc/nginx/sites-enabled/parcelwise</code>.", "<code>sudo nginx -t</code>, then <code>sudo systemctl reload nginx</code>. An edit does nothing until nginx loads it."],
+      hints: ["Which IP address appears most often in the access log? awk can print the first field of each line.", "sudo awk '{print $1}' /var/log/nginx/parcelwise.access.log | sort | uniq -c | sort -rn | head  → 203.0.113.77, user agent python-requests, walking through tracking numbers.", "sudo nano /etc/nginx/sites-enabled/parcelwise → add 'deny 203.0.113.77;' under server_name → sudo nginx -t → sudo systemctl reload nginx"],
+      checks: (s) => { const conf = stripComments((s.nginxLoaded || {}).conf || ""); return [check("nginx is denying 203.0.113.77", /deny\s+203\.0\.113\.77(\/32)?\s*;/.test(conf)), check("…and nothing else (customers and the office still get in)", !/deny\s+all\s*;/.test(conf) && !/deny\s+(10\.0\.1\.17|81\.2\.69\.142|86\.140\.11\.23|92\.40\.177\.8|185\.31\.18\.4|51\.140\.22\.97|2\.29\.61\.200)\b/.test(conf) && !/deny\s+(0\.0\.0\.0\/0|10\.0\.0\.0\/8|203\.0\.113\.0\/24)/.test(conf)), check("nginx is running", s.services.nginx.active), check("The site still works", http200(s, "http://localhost/"))]; },
+      debrief: "<code>awk | sort | uniq -c | sort -rn</code> is the Swiss Army knife of log analysis, and it works the same on any log, any server. Blocking one IP is a quick fix, but scrapers rotate addresses, so the lasting fixes are <b>rate limiting</b> (<code>limit_req</code> in nginx, or AWS WAF rate-based rules), not making tracking numbers guessable, and ideally a centralised log platform (ELK, CloudWatch, Datadog) where you'd spot this on a dashboard instead of over SSH." },
+
+    { id: "PW-111", rank: 0, xp: 110, priority: "Critical", from: "jess", title: "Critical OpenSSH patch",
+      message: "🔐 Security advisory: critical remote code execution in OpenSSH (CVE-2026-40112). web-01 must be running <b>openssh-server 1:9.6p1-3ubuntu13.8</b> or later by end of day, and it should keep getting security updates automatically after that. Sam says he 'pinned some packages' during the summer outage, if that helps?",
+      topic: "Patching",
+      setup: () => {
+        const s = webHost();
+        OD.addService(s, "ssh", { desc: "OpenBSD Secure Shell server", proc: { cmd: "sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups", user: "root", cpu: 0.0, mem: 0.1 } });
+        s.apt = { updated: false, pkgs: {
+          "openssh-server": { installed: "1:9.6p1-3ubuntu13.5", available: "1:9.6p1-3ubuntu13.8", held: true, svc: "ssh", desc: "secure shell (SSH) server, for secure access from remote machines" },
+          "openssh-client": { installed: "1:9.6p1-3ubuntu13.5", available: "1:9.6p1-3ubuntu13.8", desc: "secure shell (SSH) client" },
+          "openssh-sftp-server": { installed: "1:9.6p1-3ubuntu13.5", available: "1:9.6p1-3ubuntu13.8", held: true, desc: "secure shell (SSH) sftp server module" },
+          "tzdata": { installed: "2025b-0ubuntu0.24.04", available: "2026a-0ubuntu0.24.04", desc: "time zone and daylight-saving time data" },
+          "nginx": { installed: "1.24.0-2ubuntu7.1", available: "1.24.0-2ubuntu7.1", desc: "small, powerful, scalable web/proxy server" },
+        } };
+        return s;
+      },
+      sop: ["Refresh the package lists first: <code>sudo apt update</code>, then <code>apt list --upgradable</code>.", "<code>sudo apt upgrade</code> upgrades everything it's allowed to. Read its output: anything <b>kept back</b>?", "Held packages are pinned on purpose: <code>apt-mark showhold</code>, then <code>sudo apt-mark unhold PKG</code> once you know why (here: an old incident).", "A running daemon keeps the old code in memory until it restarts. Check with <code>sudo needrestart</code>, then <code>sudo systemctl restart ssh</code>. Keep your current session open while you test a new one."],
+      hints: ["sudo apt update && apt list --upgradable. Then try sudo apt upgrade -y. Does openssh-server get upgraded?", "It's 'kept back' because Sam put it on hold (apt-mark showhold). Unhold it, upgrade, then restart ssh so the new code is actually running.", "sudo apt-mark unhold openssh-server openssh-sftp-server && sudo apt upgrade -y && sudo systemctl restart ssh && sudo needrestart"],
+      checks: (s) => { const p = s.apt.pkgs["openssh-server"], ssh = s.services.ssh; return [check("openssh-server 1:9.6p1-3ubuntu13.8 is installed", p.installed === "1:9.6p1-3ubuntu13.8"), check("The running sshd is the patched one (restarted after the upgrade)", ssh.active && p.upgradedTick !== undefined && ssh.startedTick > p.upgradedTick), check("openssh-server is no longer on hold, so future fixes apply", !p.held), check("ssh, nginx and parcelwise-api are all running", ssh.active && s.services.nginx.active && s.services["parcelwise-api"].active)]; },
+      debrief: "Patching has three steps people forget: <b>update</b> the package lists, check what's <b>held</b> or kept back, and <b>restart</b> whatever runs the old code (needrestart tells you). Holds are fine as a short-term fix during an incident, but write down why and remove them afterwards, or they silently block security updates for months. At scale: unattended-upgrades for security fixes, a patch dashboard (AWS Systems Manager Patch Manager), or immutable servers that are rebuilt from a freshly patched image instead of patched in place." },
 
     // ===================================================== JUNIOR: Docker
     { id: "PW-201", rank: 1, xp: 120, priority: "High", from: "sam", title: "New tracking-api container dies instantly",
@@ -387,6 +456,58 @@
       },
       debrief: "With plain Docker an upgrade means a short gap: stop the old container, start the new one. That's fine for an internal service, but it's why production runs behind an orchestrator or load balancer that starts the new version, health-checks it, and only then drains the old one (a rolling or blue/green deploy). Keep the run command in a Compose file so an upgrade is a one-line tag change, and keep the previous image until the new one has proven itself." },
 
+    { id: "PW-208", rank: 1, xp: 140, priority: "High", from: "jess", title: "Critical CVEs in the label printer image",
+      message: "This week's Trivy scan flags <b>2 CRITICAL</b> vulnerabilities (OpenSSL) in <b>parcelwise/label-ui:2.1.0</b>, which runs the warehouse label printer on docker-01. Our policy is no CRITICAL or HIGH findings in production. Please rebuild it as <b>2.1.1</b> on a patched base, prove the scan is clean, and redeploy it.",
+      topic: "Image scanning",
+      setup: () => {
+        const base = "nginxinc/nginx-unprivileged:1.27.3-alpine";
+        const s = OD.newHost({ host: "docker-01", files: {
+          "/home/ops/label-ui/Dockerfile": { content: `FROM ${base}\nCOPY nginx.conf /etc/nginx/conf.d/default.conf\nCOPY dist/ /usr/share/nginx/html/\nEXPOSE 8080\n` },
+          "/home/ops/label-ui/nginx.conf": { content: "server {\n    listen 8080;\n    root /usr/share/nginx/html;\n}\n" },
+          "/home/ops/label-ui/dist/index.html": { content: "<!doctype html><title>Label Printer</title><h1>🏷️ Parcelwise labels</h1>\n" },
+        } });
+        OD.addDocker(s, {
+          images: [{ repo: "parcelwise/label-ui", tag: "2.1.0", size: 55, created: "7 weeks ago", base, layers: ["COPY nginx.conf /etc/nginx/conf.d/default.conf", "COPY dist/ /usr/share/nginx/html/", "EXPOSE 8080"] }, { repo: "nginxinc/nginx-unprivileged", tag: "1.27.3-alpine", size: 54, created: "2 months ago", base }],
+          apps: { "parcelwise/label-ui": { port: 8080, user: "nginx", boot: ["/docker-entrypoint.sh: Configuration complete; ready for start up"], ready: () => ["nginx: listening on 0.0.0.0:8080 (unprivileged)"], body: "<!doctype html><title>Label Printer</title><h1>🏷️ Parcelwise labels</h1>" } },
+          containers: [{ name: "label-ui", image: "parcelwise/label-ui:2.1.0", ports: [{ host: 80, container: 8080 }], restart: "unless-stopped", created: "7 weeks ago", up: "7 weeks" }],
+        });
+        return s;
+      },
+      sop: ["Reproduce the finding: <code>trivy image parcelwise/label-ui:2.1.0</code> (add <code>--severity CRITICAL,HIGH</code> to cut the noise). Note the package, installed and fixed versions.", "The vulnerable packages come from the <b>base image</b>. Look at <code>~/label-ui/Dockerfile</code>: which base and tag?", "Move to a patched base tag (here <code>nginxinc/nginx-unprivileged:1.27.5-alpine</code>), or add <code>RUN apk upgrade --no-cache</code>, then <code>docker build -t parcelwise/label-ui:2.1.1 ~/label-ui</code>.", "Scan the new image before shipping it, then replace the running container (same port mapping and restart policy)."],
+      hints: ["trivy image --severity CRITICAL,HIGH parcelwise/label-ui:2.1.0: which library, and which fixed version?", "The OpenSSL libraries come from the base image nginx-unprivileged:1.27.3-alpine. 1.27.5-alpine includes the fix.", "nano ~/label-ui/Dockerfile (FROM nginxinc/nginx-unprivileged:1.27.5-alpine) → docker build -t parcelwise/label-ui:2.1.1 ~/label-ui → trivy image parcelwise/label-ui:2.1.1 → docker rm -f label-ui → docker run -d --name label-ui -p 80:8080 --restart unless-stopped parcelwise/label-ui:2.1.1"],
+      checks: (s) => {
+        const i = s.docker.images.find((x) => x.repo === "parcelwise/label-ui" && x.tag === "2.1.1"), bad = i ? OD.imageVulns(i).vulns.filter((v) => v[2] === "CRITICAL" || v[2] === "HIGH") : [1], c = s.docker.containers.find((x) => x.name === "label-ui");
+        return [check("Image parcelwise/label-ui:2.1.1 exists", i), check("It has no CRITICAL or HIGH vulnerabilities", i && !bad.length), check("label-ui is running 2.1.1", c && c.status === "running" && c.image === "parcelwise/label-ui:2.1.1"), check("The label printer page works (http://localhost)", http200(s, "http://localhost/")), check("It restarts automatically", c && /unless-stopped|always/.test(c.restart || ""))];
+      },
+      debrief: "Most container CVEs live in the base image, not your code, so 'nothing changed' images still go stale. Pin base images to specific tags (or digests), rebuild regularly so you pick up patched bases, and run the scanner in CI with <code>--exit-code 1 --severity CRITICAL,HIGH</code> so a vulnerable image can't be shipped. Tools such as Dependabot or Renovate can open the base-image bump for you, and scanning the registry (ECR does this) catches CVEs published after you built." },
+
+    { id: "PW-209", rank: 1, xp: 140, priority: "High", from: "sam", title: "docker-01 disk full again",
+      message: "docker-01 is at 96% disk again and builds are failing 😩 I already ran <code>docker system prune</code> and it barely moved. Please free the space <b>without stopping the warehouse containers</b>, and make sure container logs can't do this to us again.",
+      topic: "Container logs",
+      setup: () => {
+        const s = OD.newHost({ host: "docker-01", diskTotal: 60 * GB, diskBase: 15 * GB, files: { "/home/ops/carrier-sync.env": { content: "CARRIER_API=https://api.carrier.example/v2\nLOG_LEVEL=debug\n" } } });
+        OD.addDocker(s, {
+          logFiles: true,
+          images: [{ repo: "parcelwise/carrier-sync", tag: "3.0.2", size: 148 }, { repo: "parcelwise/label-ui", tag: "2.1.0", size: 55 }, { repo: "parcelwise/tracking-api", tag: "1.8.0", size: 182 }],
+          apps: { "parcelwise/carrier-sync": { port: 9000, requiredEnv: ["CARRIER_API"], boot: ['{"level":"info","msg":"carrier-sync 3.0.2 starting"}'], ready: () => ['{"level":"debug","msg":"poll carrier api","took_ms":41,"parcels":0}', '{"level":"debug","msg":"poll carrier api","took_ms":39,"parcels":0}', '{"level":"debug","msg":"poll carrier api","took_ms":44,"parcels":1}', "… (about 9,000 lines a minute)"] }, "parcelwise/label-ui": { port: 8080 }, "parcelwise/tracking-api": { port: 8080, routes: { "/health": { status: 200, body: '{"status":"ok"}' } } } },
+          containers: [
+            { name: "carrier-sync", image: "parcelwise/carrier-sync:3.0.2", env: { CARRIER_API: "https://api.carrier.example/v2", LOG_LEVEL: "debug" }, restart: "unless-stopped", created: "6 weeks ago", up: "6 weeks", logSize: 41.6 * GB },
+            { name: "label-ui", image: "parcelwise/label-ui:2.1.0", ports: [{ host: 80, container: 8080 }], restart: "unless-stopped", up: "6 weeks", logSize: 210 * MB },
+            { name: "tracking-api", image: "parcelwise/tracking-api:1.8.0", ports: [{ host: 8080, container: 8080 }], env: { DATABASE_URL: "x", REDIS_URL: "y" }, restart: "unless-stopped", up: "6 weeks", logSize: 380 * MB },
+          ],
+        });
+        s.fs.mkdir("/etc/docker", true);
+        OD.addService(s, "docker", OD.dockerService());
+        return s;
+      },
+      sop: ["Measure: <code>df -h</code>, then find where the space is: <code>sudo du -sh /var/lib/docker/*</code> and one level deeper.", "Container stdout goes to a JSON log file per container (<code>docker inspect NAME</code> → LogPath). With the default settings it grows forever.", "Free space safely: dockerd keeps that file open, so <code>rm</code> won't free anything until Docker restarts. Empty it in place instead: <code>sudo truncate -s 0 FILE</code>.", "Prevent it: set a default in <code>/etc/docker/daemon.json</code> (<code>{\"log-opts\": {\"max-size\": \"10m\", \"max-file\": \"3\"}}</code>) and <code>sudo systemctl restart docker</code>. Log settings are fixed when a container is created, so recreate the noisy one too (or run it with <code>--log-opt max-size=10m</code>)."],
+      hints: ["sudo du -sh /var/lib/docker/containers/*: one container's log is over 40G. Which one? (docker inspect shows each container's LogPath)", "carrier-sync logs at debug level with no rotation. Truncate its log file, add log-opts to /etc/docker/daemon.json, restart docker, and recreate carrier-sync so it picks the limits up.", "sudo truncate -s 0 <carrier-sync LogPath> → sudo nano /etc/docker/daemon.json → {\"log-opts\": {\"max-size\": \"10m\", \"max-file\": \"3\"}} → sudo systemctl restart docker → docker rm -f carrier-sync → docker run -d --name carrier-sync --env-file ~/carrier-sync.env --restart unless-stopped parcelwise/carrier-sync:3.0.2"],
+      checks: (s) => {
+        const r = (n) => s.docker.containers.find((c) => c.name === n && c.status === "running"), c = r("carrier-sync"), max = (o) => /^\d+[kmg]?$/i.test(String((o || {})["max-size"] || ""));
+        return [check("Disk usage is below 80%", OD.diskPct(s) < 80), check("New containers get log rotation by default (daemon.json loaded by Docker)", s.services.docker.active && max(s.docker.daemonLogOpts)), check("carrier-sync is running with a log size limit", c && max(c.logOpts)), check("label-ui and tracking-api are still running", r("label-ui") && r("tracking-api")), check("carrier-sync restarts automatically", c && /unless-stopped|always/.test(c.restart || ""))];
+      },
+      debrief: "Docker's default json-file log driver never rotates, so one chatty container can fill a disk. That's a classic. Set <code>max-size</code>/<code>max-file</code> in <code>daemon.json</code> on every host (via config management or the AMI), remember that it only applies to containers created afterwards, and don't log at debug level in production. On a file that a process still holds open, <code>truncate</code> frees space immediately and <code>rm</code> doesn't. Longer term, ship logs off the box (CloudWatch, Loki, ELK) instead of keeping them on local disk." },
+
     // ===================================================== PLATFORM: Kubernetes
     { id: "PW-301", rank: 2, xp: 150, priority: "High", from: "sam", title: "checkout-api deploy stuck for 20 minutes",
       message: "I deployed checkout-api 3.2.0 to prod and the rollout is just… stuck? The old pods are still serving at least. Can you check what's wrong with the new ones?",
@@ -482,6 +603,47 @@
       },
       debrief: "Namespaces split one cluster into separate spaces, usually per team or app, so names can repeat and permissions can differ. Almost everything inside them is namespaced, so moving an app means moving its ConfigMaps, Secrets, Services and RBAC too. Keep each app's manifests together (Helm, Kustomize) and deploy them as one unit. And when something seems to have vanished, check <code>-n</code> / <code>-A</code> before you panic." },
 
+    { id: "PW-310", rank: 2, xp: 160, priority: "Critical", from: "sam", title: "Helm: another operation is in progress",
+      message: "Our GitLab job deploying <b>storefront 5.5.0</b> (the new gift finder 🎁) died halfway when the CI runner was reclaimed. Now every retry fails with <code>another operation (install/upgrade/rollback) is in progress</code>. Marketing launches the gift finder at noon! The job runs: <code>helm upgrade storefront ~/charts/storefront -f ~/charts/storefront/values-prod.yaml --set image.tag=5.5.0</code>",
+      topic: "Helm",
+      setup: () => {
+        const gift = STORE_HTML.replace("</p>", "</p><p>🎁 New: the Parcelwise gift finder</p>");
+        const s = k8sHost({ apps: { "parcelwise/storefront:5.5.0": { ...APPS["parcelwise/storefront"], body: gift } } });
+        s.fs.write("/home/ops/charts/storefront/Chart.yaml", "apiVersion: v2\nname: storefront\ndescription: Parcelwise web storefront\nversion: 1.8.0\nappVersion: \"5.4.1\"\n", {}, true);
+        s.fs.write("/home/ops/charts/storefront/values.yaml", "image:\n  repository: parcelwise/storefront\n  tag: \"5.4.1\"\nreplicaCount: 2\n", {}, true);
+        s.fs.write("/home/ops/charts/storefront/values-prod.yaml", "replicaCount: 2\n", {}, true);
+        s.fs.write("/home/ops/charts/storefront/templates/deployment.yaml", "# renders the storefront Deployment from .Values.image and .Values.replicaCount\n", {}, true);
+        const rev = (v, st, tag, when, desc) => OD.helmSecret("shop", "storefront", v, st, { chart: "storefront-1.8.0", appVersion: "5.4.1", values: { replicaCount: 2, image: { tag } }, updated: when, description: desc });
+        s.k8s.secrets.push(rev(1, "superseded", "5.3.0", "2026-10-02 14:11:09 +0000 UTC", "Install complete"), rev(2, "superseded", "5.3.2", "2026-10-21 10:40:51 +0000 UTC", "Upgrade complete"), rev(3, "superseded", "5.4.0", "2026-11-09 16:02:33 +0000 UTC", "Upgrade complete"), rev(4, "deployed", "5.4.1", "2026-11-18 11:25:12 +0000 UTC", "Upgrade complete"), rev(5, "pending-upgrade", "5.5.0", "2026-11-26 09:58:40 +0000 UTC", "Preparing upgrade"));
+        const d = s.k8s.deployments.find((x) => x.metadata.name === "storefront"); d.metadata.annotations = { "meta.helm.sh/release-name": "storefront", "meta.helm.sh/release-namespace": "shop" };
+        s.k8s.registry["parcelwise/storefront"] = ["5.4.0", "5.4.1", "5.5.0"];
+        return s;
+      },
+      sop: ["See what Helm thinks: <code>helm list -a</code> and <code>helm history storefront</code>. Look for a revision stuck in <b>pending-upgrade</b>.", "The job died before finishing, so Helm still holds its 'operation in progress' marker and refuses new upgrades.", "Clear it by rolling back to the last good revision: <code>helm rollback storefront N</code> (N = the last <i>deployed</i> one). Helm keeps each revision in a Secret (<code>kubectl get secrets -l owner=helm</code>), so deleting the stuck revision's Secret also works.", "Then run the job's upgrade command again and check the result: <code>helm history</code>, <code>kubectl get pods</code>, the shop."],
+      hints: ["helm history storefront: revision 5 is pending-upgrade. That's the lock.", "Roll back to revision 4 (the last deployed one), then rerun the upgrade with image.tag=5.5.0.", "helm rollback storefront 4 && helm upgrade storefront ~/charts/storefront -f ~/charts/storefront/values-prod.yaml --set image.tag=5.5.0 && helm history storefront"],
+      checks: (s) => {
+        const h = OD.helmRelease(s, "shop", "storefront"), last = h[h.length - 1], r = OD.http(s, "http://shop.parcelwise.test/");
+        return [check("No Helm operation is stuck pending", last && !last.status.startsWith("pending")), check("The latest Helm revision is deployed with image tag 5.5.0", last && last.status === "deployed" && ((last.values || {}).image || {}).tag === "5.5.0"), check("storefront runs 5.5.0 and all pods are Ready", container(s, "storefront").image === "parcelwise/storefront:5.5.0" && allReady(s, "storefront")), check("The shop shows the gift finder", !r.error && r.status === 200 && r.body.includes("gift finder"))];
+      },
+      debrief: "Helm marks a release <i>pending</i> while it works and clears the mark when it finishes. If the process is killed (a CI runner reclaimed, a timeout, Ctrl+C) the mark stays and blocks every later deploy. Rolling back to the last deployed revision is the safe way out. Prevent it with <code>helm upgrade --atomic --timeout 5m</code> (it rolls back by itself on failure) and by not running deploys on spot runners. And don't 'fix' it with <code>kubectl set image</code>: the cluster and Helm's record then disagree, and the next Helm deploy quietly undoes your change." },
+
+    { id: "PW-311", rank: 2, xp: 160, priority: "High", from: "maya", title: "Node drain is stuck",
+      message: "AWS has scheduled node <b>ip-10-0-11-42</b> for retirement tonight (degraded hardware). Please drain it so we can terminate it safely. Sam tried <code>kubectl drain</code> and it just keeps retrying something about checkout-api. Checkout must stay up while you do it!",
+      topic: "Node maintenance",
+      setup: () => {
+        const s = k8sHost({ deployments: [dep("checkout-api", "parcelwise/checkout-api:3.2.0", { replicas: 2 })], services: [svc("checkout-api", { app: "checkout-api" })], routes: [["/checkout", "checkout-api"]] });
+        s.k8s.pdbs.push({ apiVersion: "policy/v1", kind: "PodDisruptionBudget", metadata: { name: "checkout-api", namespace: "shop", creationTimestamp: "2026-09-14T10:02:00Z" }, spec: { minAvailable: 2, selector: { matchLabels: { app: "checkout-api" } } } });
+        return s;
+      },
+      sop: ["<code>kubectl get nodes</code> and <code>kubectl get pods -o wide</code>: what runs on ip-10-0-11-42?", "<code>kubectl drain NODE --ignore-daemonsets</code> cordons the node, then <b>evicts</b> its pods one by one. An eviction is refused if it would break a <b>PodDisruptionBudget</b>.", "<code>kubectl get pdb</code>: ALLOWED DISRUPTIONS 0 means no pod of that app may be evicted right now. Compare MIN AVAILABLE with the number of replicas.", "Fix the cause (more replicas, or a budget that allows one pod to go), then drain again. Don't bypass the budget with <code>--disable-eviction</code> or by deleting pods by hand."],
+      hints: ["kubectl get pdb: checkout-api has MIN AVAILABLE 2 and ALLOWED DISRUPTIONS 0. How many replicas does it have?", "2 replicas with minAvailable 2 means no pod may ever be evicted. Run 3 replicas (or change the PDB to maxUnavailable: 1), then drain.", "kubectl scale deploy checkout-api --replicas=3 && kubectl drain ip-10-0-11-42 --ignore-daemonsets && kubectl get pods -o wide"],
+      checks: (s) => {
+        const n = "ip-10-0-11-42", left = OD.k8sPods(s, null).filter((p) => p.slot && p.node === n), b = s.k8s.pdbs.find((x) => x.metadata.name === "checkout-api"), reps = (depObj(s, "checkout-api") || { spec: {} }).spec.replicas || 0;
+        const protects = b && (b.spec.minAvailable !== undefined ? (String(b.spec.minAvailable).endsWith("%") ? parseInt(b.spec.minAvailable, 10) > 0 : +b.spec.minAvailable >= 1) : String(b.spec.maxUnavailable) !== "100%" && +b.spec.maxUnavailable < reps);
+        return [check("ip-10-0-11-42 is cordoned and has no app pods left", s.k8s.cordoned.includes(n) && left.length === 0), check("checkout-api still has a PodDisruptionBudget that protects it", protects), check("…and it now allows one pod to be moved at a time", b && OD.k8sAllowedDisruptions(s, b) >= 1), check("The budget was respected (no --disable-eviction, no deleting pods by hand)", !s.k8s.forcedDrain && !s.k8s.pdbViolated), check("Checkout is up with at least 2 Ready pods", allReady(s, "checkout-api") && podsOf(s, "checkout-api").filter((p) => p.ev.ready).length >= 2 && http200(s, "http://shop.parcelwise.test/checkout"))];
+      },
+      debrief: "A PodDisruptionBudget limits <i>voluntary</i> disruptions such as drains and node upgrades, so maintenance can't take too many copies of an app down at once. But <code>minAvailable</code> equal to the replica count means no pod may ever be moved, so every drain hangs forever. Prefer <code>maxUnavailable: 1</code>, run at least 3 replicas for anything important, and spread them across zones (topologySpreadConstraints). Managed node-group upgrades in EKS respect PDBs the same way, so a bad budget blocks them too." },
+
     // ===================================================== SENIOR SRE
     { id: "PW-401", rank: 3, xp: 180, priority: "High", from: "maya", title: "New status page returns 404",
       message: "We launched status.parcelwise.test this morning but it just shows a plain nginx 404. The pods and service are fine according to Sam. Can you get it live before the newsletter goes out at noon?",
@@ -562,6 +724,68 @@
       hints: ["kubectl get pods -A: which namespace has dozens of pods?", "loadtest/load-generator: 30 k6 pods, each requesting a whole CPU, running for weeks. An HPA holds it at 30.", "kubectl delete namespace loadtest   (or: kubectl delete hpa load-generator -n loadtest && kubectl delete deploy load-generator -n loadtest)"],
       checks: (s) => [check("No load-generator pods are running", podsIn(s, null, "load-generator").length === 0), check("storefront is untouched (all pods Ready)", allReady(s, "storefront") && podsOf(s, "storefront").length >= 2), check("tracking-api is untouched", allReady(s, "tracking-api")), check("The shop still loads", http200(s, "http://shop.parcelwise.test/"))],
       debrief: "Cost is an SRE problem too. Forgotten test workloads are one of the most common sources of cloud waste: here, 30 CPUs kept extra nodes running for weeks. Give every workload an owner label and an expiry date, run load tests as Jobs that finish on their own (k6 with a duration, not forever), and set AWS Budgets alerts so a spike reaches someone within days, not at month-end. With Cluster Autoscaler or Karpenter, the spare nodes disappear once the pods do." },
+
+    { id: "PW-407", rank: 3, xp: 220, priority: "High", from: "maya", title: "Our backups can't be restored",
+      message: "Our ISO 27001 auditor arrives Monday and wants evidence of a <b>successful restore test</b>. Omar ran <code>/opt/scripts/restore-test.sh</code> on db-backup-01 and it failed, yet the backup log says 'backup complete' every single night 😰 Jess rotated the database passwords last week (the new ones are in AWS Secrets Manager). Please get us a backup we can actually restore, and the passing test to prove it.",
+      topic: "Backups & restore",
+      setup: () => {
+        const host = "parcelwise-db.cluster-c1x.eu-west-2.rds.amazonaws.com", NEW = "Bk-9f2!Rotated-Nov";
+        const files = {
+          "/opt/scripts/db-backup.sh": { content: `#!/bin/bash\n# Nightly logical backup of the parcelwise database (run by /etc/cron.d/db-backup)\nset -eu\nOUT=/var/backups/parcelwise-$(date +%F).sql.gz\npg_dump -h ${host} -U backup parcelwise | gzip > "$OUT"\necho "$(date -Is) backup complete: $OUT"\n`, owner: "root", mode: "755" },
+          "/opt/scripts/restore-test.sh": { content: "#!/bin/bash\n# Restore drill: loads the newest backup into a scratch database and counts the rows\nset -euo pipefail\nLATEST=$(ls -1t /var/backups/parcelwise-*.sql.gz | head -1)\ncreatedb restore_test\ngunzip -c \"$LATEST\" | psql -q -d restore_test\npsql -d restore_test -tc 'select count(*) from orders'\n", owner: "root", mode: "755" },
+          "/etc/cron.d/db-backup": { content: "# m h dom mon dow user command\n15 2 * * * root /opt/scripts/db-backup.sh >> /var/log/db-backup.log 2>&1\n", owner: "root" },
+          "/root/.pgpass": { content: `${host}:5432:parcelwise:backup:Bk-2025-Summer!\n`, owner: "root", mode: "600" },
+          "/home/ops/README.txt": { content: "db-backup-01: runs the nightly logical backups of the parcelwise RDS database.\nBackups: /var/backups   Scripts: /opt/scripts   Log: /var/log/db-backup.log\nThe backup user's password lives in /root/.pgpass (pg_dump reads it automatically).\n" },
+        };
+        const log = [];
+        for (let d = 16; d <= 26; d++) {
+          const date = `2026-11-${d}`, ok = d < 20;
+          files[`/var/backups/parcelwise-${date}.sql.gz`] = { content: ok ? "-- PostgreSQL database dump\n-- Dumped from database version 16.4\nCREATE TABLE public.orders (…);\nCOPY public.orders (id, …) FROM stdin;\n…\n" : "", size: ok ? 410 * MB + d * 1100 * 1024 : 20, owner: "root", mtime: `Nov ${d} 02:1${ok ? 9 : 5}` };
+          if (!ok) log.push(`pg_dump: error: connection to server at "${host}" (10.0.21.14), port 5432 failed: FATAL:  password authentication failed for user "backup"`);
+          log.push(`${date}T02:${ok ? 19 : 15}:0${d % 10}+00:00 backup complete: /var/backups/parcelwise-${date}.sql.gz`);
+        }
+        files["/var/log/db-backup.log"] = { content: log.join("\n") + "\n", owner: "root", mode: "640" };
+        const s = OD.newHost({ host: "db-backup-01", files, dirs: ["/var/backups", "/root"], users: { postgres: { uid: 112, home: "/var/lib/postgresql" } } });
+        s.aws = { account: "123456789012", secrets: { "prod/parcelwise/db-backup-user": JSON.stringify({ username: "backup", password: NEW, host, port: 5432, dbname: "parcelwise" }), "prod/parcelwise/checkout-db": JSON.stringify({ username: "checkout", password: "Pw-Ch3ck0ut!-2026" }) } };
+        const today = "/var/backups/parcelwise-2026-11-26.sql.gz";
+        s.scripts["/opt/scripts/db-backup.sh"] = (st, ctx) => {
+          if (!OD.isRoot(ctx)) return { out: `/opt/scripts/db-backup.sh: line 5: ${today}: Permission denied`, code: 1 };
+          const script = st.fs.get("/opt/scripts/db-backup.sh").content, pipefail = /^\s*set\s+(-[a-z]*o\s+pipefail|-o\s+pipefail)|^\s*set\s+-[a-z]*\s+-o\s+pipefail/m.test(script) || /set -[a-z]*o pipefail/.test(script);
+          const pw = ((st.fs.get("/root/.pgpass") || { content: "" }).content.split("\n").map((l) => l.trim().split(":")).find((f) => f[0] === host && f[3] === "backup") || [])[4];
+          if (pw === NEW) { st.fs.write(today, "-- PostgreSQL database dump\n-- Dumped from database version 16.4\nCREATE TABLE public.orders (…);\nCOPY public.orders (id, …) FROM stdin;\n…\n", { owner: "root", size: 424 * MB, mtime: "Nov 26 10:31" }); return `2026-11-26T10:31:07+00:00 backup complete: ${today}`; }
+          st.fs.write(today, "", { owner: "root", size: 20, mtime: "Nov 26 10:31" });
+          const err = `pg_dump: error: connection to server at "${host}" (10.0.21.14), port 5432 failed: FATAL:  password authentication failed for user "backup"`;
+          return pipefail ? { out: err, code: 1 } : `${err}\n2026-11-26T10:31:07+00:00 backup complete: ${today}`;
+        };
+        s.scripts["/opt/scripts/restore-test.sh"] = (st, ctx) => {
+          if (!OD.isRoot(ctx)) return { out: "createdb: error: connection to server on socket \"/var/run/postgresql/.s.PGSQL.5432\" failed: FATAL:  role \"ops\" does not exist", code: 1 };
+          const latest = st.fs.list("/var/backups").filter((n) => /^parcelwise-.*\.sql\.gz$/.test(n)).sort().pop(), p = `/var/backups/${latest}`;
+          if (!latest || st.fs.size(p) < 1024) return { out: `gzip: ${p}: unexpected end of file\npsql:<stdin>: ERROR:  relation "orders" does not exist\nRESTORE TEST FAILED: ${latest || "no backup"} could not be restored`, code: 1 };
+          st.restoreOk = latest;
+          return ` 1284113\n\nRESTORE TEST PASSED: ${latest} restored into restore_test (orders: 1,284,113 rows) at 2026-11-26T10:31:09Z`;
+        };
+        return s;
+      },
+      sop: ["Look at the evidence: <code>ls -lh /var/backups</code> (how big are the recent files?) and <code>sudo tail /var/log/db-backup.log</code>.", "Read <code>/opt/scripts/db-backup.sh</code>. In <code>pg_dump … | gzip > FILE</code> the pipeline's exit status is <code>gzip</code>'s, so a failing pg_dump still looks like success. <code>set -o pipefail</code> fixes that.", "Get the new password: <code>aws secretsmanager get-secret-value --secret-id prod/parcelwise/db-backup-user --query SecretString --output text</code>, and put it in <code>/root/.pgpass</code> (<code>sudo nano</code>, keep it mode 600).", "Run the backup by hand (<code>sudo /opt/scripts/db-backup.sh</code>), then prove it: <code>sudo /opt/scripts/restore-test.sh</code>."],
+      hints: ["ls -lh /var/backups: every file since 20 Nov is 20 bytes, an empty gzip. What does the log say before each 'backup complete'?", "pg_dump fails authentication because .pgpass still has the old password, and without pipefail the script reports success anyway. Fix both, run a backup, then run the restore test.", "aws secretsmanager get-secret-value --secret-id prod/parcelwise/db-backup-user --query SecretString --output text → sudo nano /root/.pgpass (new password) → sudo nano /opt/scripts/db-backup.sh (set -euo pipefail) → sudo /opt/scripts/db-backup.sh → sudo /opt/scripts/restore-test.sh"],
+      checks: (s) => {
+        const pg = s.fs.get("/root/.pgpass"), script = (s.fs.get("/opt/scripts/db-backup.sh") || { content: "" }).content, today = "/var/backups/parcelwise-2026-11-26.sql.gz";
+        return [check("/root/.pgpass has the rotated password", pg && pg.content.includes(":backup:Bk-9f2!Rotated-Nov")), check("…and only root can read it (mode 600)", pg && pg.owner === "root" && pg.mode === "600"), check("The backup script fails loudly if pg_dump fails (pipefail)", /set\s+-[a-z]*o\s+pipefail|set\s+-o\s+pipefail/.test(script)), check("Today's backup is a real dump, not an empty file", s.fs.isFile(today) && s.fs.size(today) > OD.MB), check("The restore test passed on today's backup", s.restoreOk === "parcelwise-2026-11-26.sql.gz")];
+      },
+      debrief: "A backup you haven't restored is a hope, not a backup. Two classic failures stacked up here: a rotated credential nobody updated, and a pipeline (<code>pg_dump | gzip</code>) whose exit status hid the error, so the job reported success for a week. Start Bash scripts with <code>set -euo pipefail</code>, alert on the <i>output</i> (a backup file below a sane size, or no new file), and run restore drills on a schedule, not just before audits. Better still, have the backup job read credentials straight from Secrets Manager so a rotation can't break it, and keep RDS automated snapshots as a second line of defence." },
+
+    { id: "PW-408", rank: 3, xp: 220, priority: "High", from: "maya", title: "Every deploy burns our error budget",
+      message: "Our checkout SLO is <b>99.9%</b> of requests succeeding each month, which allows about 43 minutes of errors. We've already burned 70% of November's error budget, and the dashboards show it's all 30 to 60 second bursts of 503s straight after each <b>checkout-api</b> deploy (Sam ships 5 a day). Please make deploys zero-downtime before the 15:00 release.",
+      topic: "SLOs & rollouts",
+      setup: () => {
+        const d = dep("checkout-api", "parcelwise/checkout-api:3.2.0", { replicas: 3, readiness: false });
+        d.spec.strategy = { type: "RollingUpdate", rollingUpdate: { maxUnavailable: "100%", maxSurge: 0 } };
+        return k8sHost({ apps: { "parcelwise/checkout-api": { ...APPS["parcelwise/checkout-api"], health: "/healthz", logs: ['{"level":"info","msg":"checkout-api 3.2.0 starting"}', '{"level":"info","msg":"warming payment-provider connections and price cache (about 25s)"}', '{"level":"info","msg":"ready","took_ms":24810}'] } }, deployments: [d], services: [svc("checkout-api", { app: "checkout-api" })], routes: [["/checkout", "checkout-api"]] });
+      },
+      sop: ["<code>kubectl describe deploy checkout-api</code>: read <b>RollingUpdateStrategy</b>. How many pods may be down at once during a rollout?", "<b>maxUnavailable</b> = pods that may be missing during a rollout. <b>maxSurge</b> = extra pods allowed above the replica count. 100% unavailable and 0 surge means 'kill everything, then start the new ones'.", "Even a gentle rollout causes errors if new pods get traffic before they're ready. The logs show a ~25s warm-up, and there's no <b>readinessProbe</b>, so Kubernetes can't tell.", "<code>kubectl edit deploy checkout-api</code>: set e.g. <code>maxUnavailable: 0</code>, <code>maxSurge: 1</code>, and add a readinessProbe on <code>/healthz</code> port 8080."],
+      hints: ["kubectl describe deploy checkout-api: RollingUpdateStrategy is '100% max unavailable, 0 max surge', and Readiness is <none>.", "Two fixes: keep old pods until new ones are ready (maxUnavailable 0, maxSurge 1), and tell Kubernetes when a pod is ready (readinessProbe on /healthz).", "kubectl edit deploy checkout-api → spec.strategy.rollingUpdate: {maxUnavailable: 0, maxSurge: 1} and under the container readinessProbe: {httpGet: {path: /healthz, port: 8080}, periodSeconds: 5}"],
+      checks: (s) => { const d = depObj(s, "checkout-api"), r = OD.k8sRolling(d), c = container(s, "checkout-api"), rp = c.readinessProbe && c.readinessProbe.httpGet; return [check("A rollout keeps at least 2 of 3 pods serving", ((d.spec.strategy || {}).type || "RollingUpdate") === "RollingUpdate" && r.maxUnavailable <= 1), check("New pods only get traffic once they're ready (readinessProbe)", rp && rp.path === "/healthz"), check("All checkout-api pods are Running and Ready", allReady(s, "checkout-api")), check("Checkout works", http200(s, "http://shop.parcelwise.test/checkout"))]; },
+      debrief: "An SLO turns 'be reliable' into a number, and the error budget tells you when reliability work beats feature work. Here the budget pointed straight at deploys. Zero-downtime rollouts need both halves: a strategy that keeps capacity (<code>maxUnavailable: 0</code>, <code>maxSurge: 1</code>) and a readiness probe so traffic waits for warm-up. Then add a <code>preStop</code> sleep so in-flight requests finish before a pod dies, and <code>minReadySeconds</code> to catch pods that crash just after starting. Measure the SLO from the user's side (load balancer or synthetic checks), not from inside the pod." },
 
   ];
 })();

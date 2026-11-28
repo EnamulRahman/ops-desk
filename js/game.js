@@ -49,9 +49,9 @@
 
   // ------------------------------------------------------------------ extra shell commands
   const HELP = {
-    Linux: "ls cd cat less head tail grep find wc sort uniq echo touch mkdir rm mv cp chmod chown nano/vim truncate du df free uptime ps top pgrep kill pkill systemctl journalctl ss lsof curl ping id groups useradd usermod groupadd getent crontab history clear",
-    Docker: "docker ps|logs|inspect|run|exec|stop|start|restart|rm|images|rmi|build|pull|image prune|system df|system prune",
-    Kubernetes: "kubectl get|describe|logs|apply -f|edit|create|delete|set image|scale|autoscale|rollout status|history|undo|restart|exec|run|top|explain|config",
+    Linux: "ls cd cat less head tail grep find wc sort uniq echo touch mkdir rm mv cp chmod chown nano/vim truncate du df free uptime ps top pgrep kill pkill systemctl journalctl ss lsof curl ping id groups useradd usermod groupadd getent crontab history clear awk cut zcat apt apt-mark needrestart openssl certbot aws",
+    Docker: "docker ps|logs|inspect|run|exec|stop|start|restart|rm|images|rmi|build|pull|image prune|system df|system prune|history|volume ls · trivy image",
+    Kubernetes: "kubectl get|describe|logs|apply -f|edit|create|delete|set image|scale|autoscale|rollout status|history|undo|restart|exec|run|top|explain|config|cordon|drain · helm list|history|upgrade|rollback",
   };
   C.help = () => ["Commands that work on this desk:", ...Object.entries(HELP).map(([k, v]) => `\n  ${k}\n    ${v}`), "\nTips: ↑/↓ for history, Tab to complete, Ctrl+L to clear, sudo for admin commands.", "Open the Guide (right) for the briefing, runbook and hints."].join("\n");
 
@@ -192,9 +192,11 @@ $ curl -s localhost/health
   }
 
   const SUB = {
-    docker: ["ps", "logs", "inspect", "run", "exec", "stop", "start", "restart", "rm", "images", "rmi", "build", "pull", "image", "system", "container"],
-    kubectl: ["get", "describe", "logs", "apply", "edit", "create", "delete", "set", "scale", "autoscale", "rollout", "exec", "run", "top", "explain", "config"],
-    systemctl: ["status", "start", "stop", "restart", "reload", "enable", "disable", "is-active", "list-units", "daemon-reload"],
+    docker: ["ps", "logs", "inspect", "run", "exec", "stop", "start", "restart", "rm", "images", "rmi", "build", "pull", "image", "system", "container", "history", "volume"],
+    kubectl: ["get", "describe", "logs", "apply", "edit", "create", "delete", "set", "scale", "autoscale", "rollout", "exec", "run", "top", "explain", "config", "cordon", "uncordon", "drain"],
+    helm: ["list", "status", "history", "get", "upgrade", "rollback", "uninstall"],
+    apt: ["update", "list", "upgrade", "install"],
+    systemctl: ["status", "start", "stop", "restart", "reload", "enable", "disable", "is-active", "is-enabled", "list-units", "list-timers", "daemon-reload"],
   };
   function complete(s, input, show) {
     const v = input.value, parts = v.split(/\s+/), word = parts[parts.length - 1], first = parts.length === 1;

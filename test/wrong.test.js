@@ -26,6 +26,22 @@ const WRONG = {
   "PW-404": ["kubectl rollout undo deploy/payments-api", "kubectl rollout undo deploy/payments-api"], // flips between two broken releases
   "PW-405": ["kubectl scale deploy search-api --replicas=6"],               // more pods, but the HPA is still blind
   "PW-406": ["kubectl scale deploy load-generator -n loadtest --replicas=1"], // the HPA scales it straight back to 30
+  "PW-109": ["sudo certbot renew", "sudo systemctl start certbot.timer"],  // nginx still serves the old cert, timer not enabled
+  "PW-109b": ["sudo systemctl enable --now certbot.timer", "sudo systemctl reload nginx"], // nothing actually renewed
+  "PW-110": [{ edit: "sudo nano /etc/nginx/sites-enabled/parcelwise", fn: (t) => t.replace("    location / {", "    deny 203.0.113.77;\n    location / {") }], // edited, never reloaded
+  "PW-110b": [{ edit: "sudo nano /etc/nginx/sites-enabled/parcelwise", fn: (t) => t.replace("    location / {", "    deny all;\n    location / {") }, "sudo systemctl reload nginx"], // blocks everyone
+  "PW-111": ["sudo apt update", "sudo apt install -y --allow-change-held-packages openssh-server", "sudo systemctl restart ssh"], // patched, but still held
+  "PW-111b": ["sudo apt update", "sudo apt-mark unhold openssh-server", "sudo apt upgrade -y"], // old sshd still running
+  "PW-208": ["docker build -t parcelwise/label-ui:2.1.1 /home/ops/label-ui", "docker rm -f label-ui", "docker run -d --name label-ui -p 80:8080 --restart unless-stopped parcelwise/label-ui:2.1.1"], // same vulnerable base
+  "PW-209": ["sudo rm /var/lib/docker/containers/1a4f898daaaae1f0c9d2a7b4/1a4f898daaaae1f0c9d2a7b4-json.log"], // dockerd still holds it open
+  "PW-209b": ["sudo truncate -s 0 /var/lib/docker/containers/1a4f898daaaae1f0c9d2a7b4/1a4f898daaaae1f0c9d2a7b4-json.log"], // space back, but it will fill up again
+  "PW-310": ["kubectl set image deploy/storefront storefront=parcelwise/storefront:5.5.0"], // Helm still stuck and out of sync
+  "PW-311": ["kubectl drain ip-10-0-11-42 --ignore-daemonsets --disable-eviction"], // bypassed the budget
+  "PW-311b": ["kubectl delete pdb checkout-api", "kubectl drain ip-10-0-11-42 --ignore-daemonsets"], // removed the protection
+  "PW-407": [{ edit: "sudo nano /opt/scripts/db-backup.sh", fn: (t) => t.replace("set -eu\n", "set -euo pipefail\n") }, "sudo /opt/scripts/db-backup.sh"], // fails loudly now, but still no backup
+  "PW-407b": [{ edit: "sudo nano /root/.pgpass", fn: (t) => t.replace("Bk-2025-Summer!", "Bk-9f2!Rotated-Nov") }, "sudo /opt/scripts/db-backup.sh"], // backup works, but never restored and no pipefail
+  "PW-408": [{ edit: "kubectl edit deploy checkout-api", fn: (t, y) => { const o = y.load(t); o.spec.template.spec.containers[0].readinessProbe = { httpGet: { path: "/healthz", port: 8080 } }; return y.dump(o); } }], // still replaces every pod at once
+  "PW-408b": [{ edit: "kubectl edit deploy checkout-api", fn: (t, y) => { const o = y.load(t); o.spec.strategy.rollingUpdate = { maxUnavailable: 0, maxSurge: 1 }; return y.dump(o); } }], // traffic still hits cold pods
 };
 let fail = 0;
 for (const [id, lines] of Object.entries(WRONG)) {

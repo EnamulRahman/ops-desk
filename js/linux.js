@@ -32,7 +32,8 @@
       s.journal[name].push(...(res.journal || []), `systemd[1]: ${name}.service: Failed with result 'exit-code'.`, `systemd[1]: Failed to start ${name}.service - ${svc.desc}.`);
       return res;
     }
-    svc.active = true; svc.failed = false;
+    svc.active = true; svc.failed = false; svc.startedTick = OD.stamp(s);
+    if (svc.onStart) svc.onStart(s);
     if (svc.proc && !s.procs.some((p) => p.svc === name)) s.procs.push({ pid: OD.nextPid(s), user: svc.proc.user || "root", cpu: svc.proc.cpu || 0.3, mem: svc.proc.mem || 1.2, cmd: svc.proc.cmd, svc: name, start: "09:02" });
     if (!quiet) s.journal[name].push(`systemd[1]: Started ${name}.service - ${svc.desc}.`);
     // a restart releases deleted-but-open files held by this service
@@ -41,10 +42,13 @@
   };
   OD.stopService = (s, name) => {
     const svc = s.services[name]; svc.active = false; svc.failed = false;
+    if (svc.onStop) svc.onStop(s);
     s.procs = s.procs.filter((p) => p.svc !== name);
     s.openDeleted = s.openDeleted.filter((d) => d.svc !== name);
     (s.journal[name] = s.journal[name] || []).push(`systemd[1]: Stopped ${name}.service - ${svc.desc}.`);
   };
+  OD.stamp = (s) => (s._seq = (s._seq || 0) + 1); // strictly increasing, even within one command line
+  OD.holdsOf = (s, v) => (typeof v.holds === "function" ? v.holds(s) : v.holds || []);
   OD.nextPid = (s) => { s._pid = (s._pid || 1800) + 37; return s._pid; };
   OD.diskUsed = (s) => s.disk.base + s.fs.size("/") + s.openDeleted.reduce((a, d) => a + d.size, 0) + (s.docker ? s.docker.images.reduce((a, i) => a + i.size, 0) + s.docker.containers.reduce((a, c) => a + (c.rwSize || 0), 0) : 0);
   OD.diskPct = (s) => Math.round((OD.diskUsed(s) / s.disk.total) * 100);
@@ -235,6 +239,41 @@
   C.wc = (ctx) => { const { flags, pos } = parseArgs(ctx.args); const r = readInput(ctx, pos[0]); if (r && r.denied) return { out: `wc: ${pos[0]}: Permission denied`, code: 1 }; const t = r || ""; const lines = t ? t.split("\n").length : 0; return flags.l ? String(lines) : `${lines} ${t.split(/\s+/).filter(Boolean).length} ${t.length}`; };
   C.sort = (ctx) => { const { flags } = parseArgs(ctx.args); let l = (ctx.stdin || "").split("\n"); l.sort(flags.n ? (a, b) => parseFloat(a) - parseFloat(b) : undefined); if (flags.r) l.reverse(); return l.join("\n"); };
   C.uniq = (ctx) => { const { flags } = parseArgs(ctx.args); const l = (ctx.stdin || "").split("\n"); const out = []; let prev = null, n = 0; for (const x of [...l, null]) { if (x === prev) { n++; continue; } if (prev !== null) out.push(flags.c ? `${String(n).padStart(7)} ${prev}` : prev); prev = x; n = 1; } return out.join("\n"); };
+  // awk: just enough for log analysis: [-F sep] '[/re/ | $N op value] {print $A, $B}'
+  C.awk = (ctx) => {
+    const { flags, pos } = parseArgs(ctx.args, ["F"]); const prog = pos[0];
+    if (!prog) return { out: "usage: awk [-F fs] 'program' [file ...]", code: 2 };
+    const m = prog.trim().match(/^(.*?)\s*\{\s*print\s*(.*?)\s*;?\s*\}\s*$/s) || (prog.trim().match(/^(\/.*\/|\$\w+\s*(==|!=|~|>|<|>=|<=)\s*\S+)$/) ? [null, prog.trim(), ""] : null);
+    if (!m) return { out: `awk: this simulator understands programs like '{print $1}' or '$9 == 500 {print $7}'`, code: 2 };
+    const txt = readInput(ctx, pos[1]); if (txt === null) return { out: `awk: cannot open "${pos[1]}" (No such file or directory)`, code: 2 }; if (txt && txt.denied) return { out: `awk: cannot open "${pos[1]}" (Permission denied)`, code: 2 };
+    const sep = flags.F === undefined ? null : flags.F === "\\t" ? "\t" : flags.F;
+    const fields = (l) => { const f = sep === null ? l.trim().split(/\s+/) : l.split(sep); return [l, ...f]; };
+    const val = (f, ref) => { if (ref === "$0") return f[0]; if (ref === "$NF") return f[f.length - 1]; const n = ref.match(/^\$(\d+)$/); if (n) return f[+n[1]] ?? ""; if (ref === "NF") return String(f.length - 1); return ref.replace(/^"(.*)"$/, "$1"); };
+    const cond = m[1].trim();
+    const test = (l, f) => {
+      if (!cond) return true;
+      const re = cond.match(/^\/(.*)\/$/); if (re) return new RegExp(re[1]).test(l);
+      const c = cond.match(/^(\$\w+)\s*(==|!=|~|>=|<=|>|<)\s*(.+)$/); if (!c) return true;
+      const a = val(f, c[1]), b = c[3].trim();
+      if (c[2] === "~") return new RegExp(b.replace(/^\/(.*)\/$/, "$1")).test(a);
+      const bv = b.replace(/^"(.*)"$/, "$1"), num = !isNaN(+a) && !isNaN(+bv) && bv !== "";
+      return { "==": num ? +a === +bv : a === bv, "!=": num ? +a !== +bv : a !== bv, ">": +a > +bv, "<": +a < +bv, ">=": +a >= +bv, "<=": +a <= +bv }[c[2]];
+    };
+    const refs = m[2] ? m[2].split(/\s*,\s*/) : ["$0"];
+    return (txt || "").split("\n").filter((l) => l !== "").map((l) => [l, fields(l)]).filter(([l, f]) => test(l, f)).map(([, f]) => refs.map((r) => val(f, r)).join(" ")).join("\n");
+  };
+  C.cut = (ctx) => {
+    const { flags, pos } = parseArgs(ctx.args, ["d", "f", "c"]);
+    const txt = readInput(ctx, pos[0]); if (txt === null) return { out: `cut: ${pos[0]}: No such file or directory`, code: 1 }; if (txt && txt.denied) return { out: `cut: ${pos[0]}: Permission denied`, code: 1 };
+    if (!flags.f) return { out: "cut: you must specify a list of bytes, characters, or fields", code: 1 };
+    const d = flags.d === undefined ? "\t" : flags.d, want = String(flags.f).split(",").flatMap((r) => { const [a, b] = r.split("-").map(Number); return b ? Array.from({ length: b - a + 1 }, (_, i) => a + i) : [a]; });
+    return (txt || "").split("\n").map((l) => { const f = l.split(d); return want.map((i) => f[i - 1]).filter((x) => x !== undefined).join(d); }).join("\n");
+  };
+  C.zcat = C.gunzip = (ctx) => {
+    const files = ctx.args.filter((a) => !a.startsWith("-"));
+    if (ctx.name === "gunzip" && !ctx.args.includes("-c")) return { out: "Tip: use gunzip -c FILE (or zcat FILE) to read it without unpacking it on disk.", code: 1 };
+    return files.map((a) => { const f = ctx.state.fs.get(P(ctx, a)); if (!f) return `gzip: ${a}: No such file or directory`; if (!readable(ctx, f)) return `gzip: ${a}: Permission denied`; if (ctx.state.fs.size(P(ctx, a)) < 64) return `gzip: ${a}: unexpected end of file`; return f.content.replace(/\n$/, "") || `(${human(ctx.state.fs.size(P(ctx, a)))} of compressed data)`; }).join("\n");
+  };
   C.echo = (ctx) => ctx.args.filter((a) => a !== "-e" && a !== "-n").join(" ");
   C.touch = (ctx) => { for (const a of ctx.args) { const p = P(ctx, a); if (!canWrite(ctx, p)) return { out: `touch: cannot touch '${a}': Permission denied`, code: 1 }; if (!ctx.state.fs.isFile(p)) if (!ctx.state.fs.write(p, "")) return { out: `touch: cannot touch '${a}': No such file or directory`, code: 1 }; } return ""; };
   C.mkdir = (ctx) => { const { flags, pos } = parseArgs(ctx.args); for (const a of pos) { const p = P(ctx, a); if (!canWrite(ctx, ctx.state.fs.parent(p)) && !canWrite(ctx, p)) return { out: `mkdir: cannot create directory '${a}': Permission denied`, code: 1 }; if (!ctx.state.fs.mkdir(p, !!flags.p)) return { out: `mkdir: cannot create directory '${a}': No such file or directory`, code: 1 }; } return ""; };
@@ -247,7 +286,7 @@
       if (s.fs.isDir(p) && !(flags.r || flags.R)) { out.push(`rm: cannot remove '${a}': Is a directory`); continue; }
       if (!canWrite(ctx, p)) { out.push(`rm: cannot remove '${a}': Permission denied`); continue; }
       // a file still held open by a running process: the name goes, the space doesn't
-      const holder = Object.entries(s.services).find(([, v]) => v.active && (v.holds || []).includes(p));
+      const holder = Object.entries(s.services).find(([, v]) => v.active && OD.holdsOf(s, v).includes(p));
       if (holder) s.openDeleted.push({ path: p, size: s.fs.size(p), svc: holder[0] });
       s.fs.rm(p);
     }
@@ -414,6 +453,10 @@
       const rows = Object.entries(s.services).filter(([, v]) => !flags.failed || v.failed).map(([n, v]) => [`${n}.service`, "loaded", v.active ? "active" : v.failed ? "failed" : "inactive", v.active ? "running" : v.failed ? "failed" : "dead", v.desc]);
       return table([["UNIT", "LOAD", "ACTIVE", "SUB", "DESCRIPTION"], ...rows], 2);
     }
+    if (verb === "list-timers") {
+      const rows = Object.entries(s.services).filter(([n]) => n.endsWith(".timer")).map(([n, v]) => [v.active ? v.next || "Fri 2026-11-27 00:00:00 UTC" : "-", v.active ? v.left || "13h left" : "-", v.last || "-", v.active ? "-" : "-", n, (v.activates || n.replace(".timer", ".service"))]);
+      return rows.length ? table([["NEXT", "LEFT", "LAST", "PASSED", "UNIT", "ACTIVATES"], ...rows], 2) + `\n\n${rows.length} timers listed.` : "0 timers listed.";
+    }
     if (verb === "daemon-reload") return isRoot(ctx) ? "" : { out: "Failed to reload daemon: Access denied", code: 1 };
     const svc = s.services[unit];
     if (!svc) return { out: `Unit ${unitRaw || "?"}.service could not be found.`, code: 4 };
@@ -459,7 +502,7 @@
   C.lsof = (ctx) => {
     const s = ctx.state, rows = [["COMMAND", "PID", "USER", "FD", "TYPE", "SIZE/OFF", "NAME"]];
     for (const d of s.openDeleted) { const p = s.procs.find((x) => x.svc === d.svc) || {}; rows.push([(p.cmd || d.svc).split(" ")[0].split("/").pop().slice(0, 9), p.pid || "?", p.user || "root", "3w", "REG", d.size, `${d.path} (deleted)`]); }
-    for (const [n, v] of Object.entries(s.services)) if (v.active) for (const h of v.holds || []) if (s.fs.isFile(h)) { const p = s.procs.find((x) => x.svc === n) || {}; rows.push([(p.cmd || n).split(" ")[0].split("/").pop().slice(0, 9), p.pid || "?", p.user || "root", "3w", "REG", s.fs.size(h), h]); }
+    for (const [n, v] of Object.entries(s.services)) if (v.active) for (const h of OD.holdsOf(s, v)) if (s.fs.isFile(h)) { const p = s.procs.find((x) => x.svc === n) || {}; rows.push([(p.cmd || n).split(" ")[0].split("/").pop().slice(0, 9), p.pid || "?", p.user || "root", "3w", "REG", s.fs.size(h), h]); }
     return table(rows, 2);
   };
   C.ping = (ctx) => { const h = ctx.args.filter((a) => !a.startsWith("-") && !/^\d+$/.test(a))[0]; return h ? `PING ${h}: 56 data bytes\n64 bytes from ${h}: icmp_seq=1 ttl=64 time=0.4 ms\n\n--- ${h} ping statistics ---\n1 packets transmitted, 1 received, 0% packet loss` : { out: "ping: usage error: Destination address required", code: 1 }; };
@@ -489,6 +532,109 @@
     return typeof r === "object" && r ? r : { out: r || "", code: 0 };
   };
   C.crontab = (ctx) => { const { flags } = parseArgs(ctx.args); const c = ctx.state.fs.get("/var/spool/cron/crontabs/ops"); if (flags.l) return c ? c.content.trim() : "no crontab for ops"; if (flags.e) return EDITABLE({ ...ctx, root: true, name: "crontab" }, "/var/spool/cron/crontabs/ops"); return "usage: crontab [-l | -e]"; };
+  // ------------------------------------------------------------------ packages (apt), only where a ticket sets s.apt
+  // s.apt = { updated, pkgs: { name: { installed, available, held, svc, desc } } }
+  const aptPkg = (s, n) => s.apt && Object.prototype.hasOwnProperty.call(s.apt.pkgs, n) ? s.apt.pkgs[n] : null;
+  const candidate = (s, p) => (s.apt.updated ? p.available || p.installed : p.installed);
+  const upgradable = (s) => Object.entries(s.apt.pkgs).filter(([, p]) => candidate(s, p) !== p.installed);
+  function aptUpgrade(s, names) {
+    const out = [], restart = [];
+    for (const n of names) { const p = s.apt.pkgs[n]; out.push(`Unpacking ${n} (${candidate(s, p)}) over (${p.installed}) ...`, `Setting up ${n} (${candidate(s, p)}) ...`); p.installed = candidate(s, p); p.upgradedTick = OD.stamp(s); if (p.svc && s.services[p.svc] && s.services[p.svc].active) restart.push(p.svc); }
+    if (restart.length) out.push("", "Restarting services...", "", "Service restarts being deferred:", ...restart.map((x) => ` systemctl restart ${x}.service`), "", "No containers need to be restarted.", "", "No user sessions are running outdated binaries.");
+    return out.join("\n");
+  }
+  C.apt = C["apt-get"] = (ctx) => {
+    const s = ctx.state; if (!s.apt) return { out: "This box is managed by its image pipeline: there are no package tasks here.", code: 1 };
+    const { flags, pos } = parseArgs(ctx.args); const [verb, ...names] = pos;
+    const needRoot = () => (isRoot(ctx) ? null : { out: "E: Could not open lock file /var/lib/dpkg/lock-frontend - open (13: Permission denied)\nE: Unable to acquire the dpkg frontend lock (/var/lib/dpkg/lock-frontend), are you root?", code: 100 });
+    if (verb === "update") { const d = needRoot(); if (d) return d; s.apt.updated = true; const n = upgradable(s).length; return ["Hit:1 http://eu-west-2.ec2.archive.ubuntu.com/ubuntu noble InRelease", "Get:2 http://eu-west-2.ec2.archive.ubuntu.com/ubuntu noble-updates InRelease [126 kB]", "Get:3 http://security.ubuntu.com/ubuntu noble-security InRelease [126 kB]", "Fetched 252 kB in 1s (311 kB/s)", "Reading package lists... Done", "Building dependency tree... Done", n ? `${n} package${n === 1 ? " can" : "s can"} be upgraded. Run 'apt list --upgradable' to see ${n === 1 ? "it" : "them"}.` : "All packages are up to date."].join("\n"); }
+    if (verb === "list") { const rows = flags.upgradable ? upgradable(s) : flags.installed ? Object.entries(s.apt.pkgs) : []; return ["Listing... Done", ...rows.map(([n, p]) => `${n}/noble-updates,noble-security ${flags.upgradable ? candidate(s, p) : p.installed} amd64 [${flags.upgradable ? `upgradable from: ${p.installed}` : "installed"}]`)].join("\n"); }
+    if (verb === "upgrade" || verb === "full-upgrade" || verb === "dist-upgrade") {
+      const d = needRoot(); if (d) return d;
+      const up = upgradable(s), kept = up.filter(([, p]) => p.held).map(([n]) => n), go = up.filter(([, p]) => !p.held).map(([n]) => n);
+      const plan = ["Reading package lists... Done", "Building dependency tree... Done", "Calculating upgrade... Done", ...(kept.length ? ["The following packages have been kept back:", "  " + kept.join(" ")] : []), ...(go.length ? ["The following packages will be upgraded:", "  " + go.join(" ")] : []), `${go.length} upgraded, 0 newly installed, 0 to remove and ${kept.length} not upgraded.`];
+      if (!go.length) return plan.join("\n");
+      if (!flags.y && !flags.yes) return plan.concat("Do you want to continue? [Y/n] (re-run with -y to confirm)").join("\n");
+      return plan.join("\n") + "\n" + aptUpgrade(s, go);
+    }
+    if (verb === "install") {
+      const d = needRoot(); if (d) return d;
+      for (const n of names) if (!aptPkg(s, n)) return { out: `Reading package lists... Done\nE: Unable to locate package ${n}`, code: 100 };
+      const go = names.filter((n) => candidate(s, s.apt.pkgs[n]) !== s.apt.pkgs[n].installed), held = go.filter((n) => s.apt.pkgs[n].held);
+      if (!go.length) return names.map((n) => `${n} is already the newest version (${s.apt.pkgs[n].installed}).`).join("\n") + "\n0 upgraded, 0 newly installed, 0 to remove.";
+      if (held.length && !flags["allow-change-held-packages"]) { const msg = ["Reading package lists... Done", "The following held packages will be changed:", "  " + held.join(" "), "The following packages will be upgraded:", "  " + go.join(" ")]; return flags.y || flags.yes ? { out: msg.concat("E: Held packages were changed and -y was used without --allow-change-held-packages.").join("\n"), code: 100 } : msg.concat("Do you want to continue? [Y/n] (re-run with -y to confirm)").join("\n"); }
+      if (!flags.y && !flags.yes) return ["The following packages will be upgraded:", "  " + go.join(" "), "Do you want to continue? [Y/n] (re-run with -y to confirm)"].join("\n");
+      return aptUpgrade(s, go);
+    }
+    return { out: "Usage here: apt update | apt list --upgradable | apt upgrade [-y] | apt install [-y] PKG", code: 1 };
+  };
+  C["apt-mark"] = (ctx) => {
+    const s = ctx.state; if (!s.apt) return { out: "apt-mark: no packages are managed on this box", code: 1 };
+    const [verb, ...names] = ctx.args;
+    if (verb === "showhold") return Object.entries(s.apt.pkgs).filter(([, p]) => p.held).map(([n]) => n).join("\n");
+    if (verb === "hold" || verb === "unhold") { if (!isRoot(ctx)) return { out: "E: Could not create temporary file for /var/lib/dpkg/status - mkstemp (13: Permission denied)", code: 100 }; return names.map((n) => { const p = aptPkg(s, n); if (!p) return `E: Unable to locate package ${n}`; const was = p.held; p.held = verb === "hold"; return verb === "hold" ? (was ? `${n} was already set on hold.` : `${n} set on hold.`) : (was ? `Canceled hold on ${n}.` : `${n} was already not on hold.`); }).join("\n"); }
+    return { out: "Usage: apt-mark hold|unhold|showhold PKG", code: 1 };
+  };
+  C["apt-cache"] = (ctx) => { const s = ctx.state, [verb, n] = ctx.args, p = s.apt && aptPkg(s, n); if (verb !== "policy" || !p) return { out: p ? "Usage here: apt-cache policy PKG" : `N: Unable to locate package ${n}`, code: 1 }; return `${n}:\n  Installed: ${p.installed}\n  Candidate: ${candidate(s, p)}\n  Version table:${s.apt.updated && p.available !== p.installed ? `\n     ${p.available} 500\n        500 http://security.ubuntu.com/ubuntu noble-security/main amd64 Packages` : ""}\n *** ${p.installed} 100\n        100 /var/lib/dpkg/status`; };
+  C.dpkg = (ctx) => { const s = ctx.state, n = ctx.args.find((a) => !a.startsWith("-")), p = s.apt && aptPkg(s, n); if (!p) return { out: `dpkg-query: no packages found matching ${n || ""}`, code: 1 }; return `Desired=Unknown/Install/Remove/Purge/Hold\n||/ Name            Version                 Architecture Description\n+++-===============-=======================-============-==================================\n${p.held ? "hi" : "ii"}  ${n.padEnd(15)} ${p.installed.padEnd(23)} amd64        ${p.desc || n}`; };
+  C.needrestart = (ctx) => { const s = ctx.state; if (!s.apt) return "No services need to be restarted."; const stale = Object.values(s.apt.pkgs).filter((p) => p.svc && s.services[p.svc] && s.services[p.svc].active && p.upgradedTick !== undefined && (s.services[p.svc].startedTick ?? -1) < p.upgradedTick).map((p) => p.svc); return stale.length ? ["Scanning processes...", "Scanning linux images...", "", "Services to be restarted (they are running an outdated binary):", ...stale.map((x) => ` systemctl restart ${x}.service`)].join("\n") : "Scanning processes...\n\nNo services need to be restarted."; };
+
+  // ------------------------------------------------------------------ TLS certificates, only where a ticket sets s.certs
+  const certAt = (ctx, f) => ctx.state.certs && ctx.state.certs[ctx.state.fs.norm(ctx.state.cwd, f)];
+  const certLines = (c) => ({ subject: `subject=${c.subject}`, issuer: `issuer=${c.issuer}`, startdate: `notBefore=${c.notBefore}`, enddate: `notAfter=${c.notAfter}`, serial: `serial=${c.serial}` });
+  C.openssl = (ctx) => {
+    // openssl uses single-dash long options (-noout, -dates, -in FILE)
+    const [sub, ...rest] = ctx.args, flags = {};
+    for (let i = 0; i < rest.length; i++) { const a = rest[i]; if (!a.startsWith("-")) continue; const k = a.replace(/^-+/, ""); flags[k] = ["in", "connect", "servername"].includes(k) ? rest[++i] : true; }
+    if (sub === "x509") {
+      const c = flags.in && certAt(ctx, flags.in); if (!flags.in) return { out: "Tip: openssl x509 -in FILE -noout -dates", code: 1 }; if (!c) return { out: `Could not open file or uri for loading certificate from ${flags.in}`, code: 1 };
+      const L = certLines(c), want = ["subject", "issuer", "dates", "enddate", "startdate", "serial"].filter((k) => flags[k]);
+      if (flags.text || !want.length) return [`Certificate:`, `    Data:`, `        Serial Number: ${c.serial}`, `        Issuer: ${c.issuer}`, `        Validity`, `            Not Before: ${c.notBefore}`, `            Not After : ${c.notAfter}`, `        Subject: ${c.subject}`, `        X509v3 Subject Alternative Name:`, `            ${c.san.map((d) => "DNS:" + d).join(", ")}`].join("\n");
+      return want.flatMap((k) => (k === "dates" ? [L.startdate, L.enddate] : [L[k]])).join("\n");
+    }
+    if (sub === "s_client") {
+      const c = ctx.state.tlsServing && ctx.state.tlsServing(); if (!c) return { out: `connect:errno=111\n${(flags.connect || "")}: Connection refused`, code: 1 };
+      return [`CONNECTED(00000003)`, `depth=0 ${c.subject}`, c.expired ? "verify error:num=10:certificate has expired" : "verify return:1", `notAfter=${c.notAfter}`, "---", `Server certificate`, `subject=${c.subject}`, `issuer=${c.issuer}`, "---", `Verify return code: ${c.expired ? "10 (certificate has expired)" : "0 (ok)"}`].join("\n");
+    }
+    return { out: "Supported here: openssl x509 -in FILE -noout -dates|-subject|-text, openssl s_client -connect HOST:443", code: 1 };
+  };
+  C.certbot = (ctx) => {
+    const s = ctx.state; if (!s.letsencrypt) return { out: "certbot: command not found", code: 127 };
+    if (!isRoot(ctx)) return { out: "The following error was encountered:\n[Errno 13] Permission denied: '/var/log/letsencrypt/.certbot.lock'\nEither run as root, or set --config-dir, --work-dir, and --logs-dir to writeable paths.", code: 1 };
+    const { flags, pos } = parseArgs(ctx.args);
+    const list = Object.entries(s.letsencrypt);
+    if (pos[0] === "certificates") return ["Found the following certs:", ...list.flatMap(([n, l]) => { const c = s.certs[l.cert]; return [`  Certificate Name: ${n}`, `    Domains: ${c.san.join(" ")}`, `    Expiry Date: ${c.notAfterIso} (${c.expired ? "INVALID: EXPIRED" : "VALID: 89 days"})`, `    Certificate Path: ${l.cert}`, `    Private Key Path: ${l.key}`]; })].join("\n");
+    if (pos[0] === "renew") {
+      const out = ["Saving debug log to /var/log/letsencrypt/letsencrypt.log", ""];
+      for (const [n, l] of list) {
+        out.push(`Processing /etc/letsencrypt/renewal/${n}.conf`);
+        const c = s.certs[l.cert];
+        if (!c.expired && !flags["force-renewal"]) { out.push(`Certificate not yet due for renewal`); continue; }
+        if (!s.services.nginx || !s.services.nginx.active) { out.push("Renewing an existing certificate for " + c.san.join(" and "), "Certbot failed to authenticate some domains (authenticator: webroot).", `  Domain: ${c.san[0]}`, "  Type:   connection", "  Detail: Fetching http://" + c.san[0] + "/.well-known/acme-challenge/…: Connection refused"); return { out: out.join("\n"), code: 1 }; }
+        if (flags["dry-run"]) { out.push(`Simulating renewal of an existing certificate for ${c.san.join(" and ")}`, "", "Congratulations, all simulated renewals succeeded:", `  ${l.cert} (success)`); continue; }
+        Object.assign(c, l.renewed, { expired: false });
+        out.push(`Renewing an existing certificate for ${c.san.join(" and ")}`, "", "Congratulations, all renewals succeeded:", `  ${l.cert} (success)`);
+      }
+      return out.join("\n");
+    }
+    return { out: "Supported here: certbot certificates, certbot renew [--dry-run]", code: 1 };
+  };
+
+  // ------------------------------------------------------------------ a little of the AWS CLI, only where a ticket sets s.aws
+  C.aws = (ctx) => {
+    const s = ctx.state; if (!s.aws) return { out: "Unable to locate credentials. You can configure credentials by running \"aws configure\".", code: 253 };
+    const { flags, pos } = parseArgs(ctx.args, ["secret-id", "query", "output", "region"]);
+    if (pos[0] === "sts" && pos[1] === "get-caller-identity") return JSON.stringify({ UserId: "AROAEXAMPLEOPSROLE:ops", Account: s.aws.account, Arn: `arn:aws:sts::${s.aws.account}:assumed-role/OpsOnCall/ops` }, null, 4);
+    if (pos[0] === "secretsmanager" && pos[1] === "list-secrets") return JSON.stringify({ SecretList: Object.keys(s.aws.secrets).map((n) => ({ Name: n, ARN: `arn:aws:secretsmanager:eu-west-2:${s.aws.account}:secret:${n}-AbCdEf` })) }, null, 4);
+    if (pos[0] === "secretsmanager" && pos[1] === "get-secret-value") {
+      const id = flags["secret-id"], v = id && Object.prototype.hasOwnProperty.call(s.aws.secrets, id) ? s.aws.secrets[id] : undefined;
+      if (v === undefined) return { out: `An error occurred (ResourceNotFoundException) when calling the GetSecretValue operation: Secrets Manager can't find the specified secret.`, code: 254 };
+      if (flags.query === "SecretString") return flags.output === "text" ? v : JSON.stringify(v);
+      return JSON.stringify({ ARN: `arn:aws:secretsmanager:eu-west-2:${s.aws.account}:secret:${id}-AbCdEf`, Name: id, VersionId: "6c1f8e2a-2b0d-4a51-9f3c-0d1e2f3a4b5c", SecretString: v, VersionStages: ["AWSCURRENT"], CreatedDate: "2026-11-19T14:02:11+00:00" }, null, 4);
+    }
+    return { out: "Supported here: aws sts get-caller-identity, aws secretsmanager list-secrets, aws secretsmanager get-secret-value --secret-id ID [--query SecretString --output text]", code: 252 };
+  };
+
   C.clear = () => ({ out: "\x1bclear" });
   C.exit = C.logout = () => "There's nowhere to go. You're on shift! 😄";
   C.true = () => ""; C.false = () => ({ out: "", code: 1 });
